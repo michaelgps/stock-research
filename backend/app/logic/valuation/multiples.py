@@ -272,29 +272,104 @@ def compute_forward_trend(
 # ---------------------------------------------------------------------------
 
 async def fetch_daily_prices(ticker: str, db=None) -> list[dict]:
-    """Fetch ~5 years of daily prices, with DB caching. Uses yfinance (free) instead of FMP."""
-    # Try DB cache first
+    """Fetch ~5 years of daily prices. Uses tb_market_price + yfinance."""
     if db is not None:
-        from app.db.financial_store import load_cached_daily_prices, save_daily_prices
-        cached = load_cached_daily_prices(db, ticker)
-        if cached is not None:
-            return cached
+        from app.services.market_price_service import ensure_daily_prices
+        return ensure_daily_prices(db, ticker)
 
     from app.logic.data_sources.yfinance_client import get_daily_prices
-    prices = get_daily_prices(ticker)
-
-    # Save to DB cache
-    if db is not None and prices:
-        from app.db.financial_store import save_daily_prices
-        save_daily_prices(db, ticker, prices)
-
-    return prices
+    return get_daily_prices(ticker)
 
 
-async def fetch_peer_pe(ticker: str, ticker_eps_growth: float | None = None, industry: str | None = None) -> dict:
-    """Fetch peer forward P/E data from FMP (with growth adjustment)."""
+async def fetch_peer_pe(
+    ticker: str,
+    ticker_eps_growth: float | None = None,
+    industry: str | None = None,
+    db=None,
+) -> dict:
+    """Fetch peer forward P/E data for manually supplied peers only."""
+    ticker = ticker.upper()
+    manual_peers: list[str] = []
+    if db is not None:
+        from app.db.financial import CompanyProfile
+        from app.repositories import data_pull_log_repository
+
+        today = data_pull_log_repository.today_str()
+        profile = db.query(CompanyProfile).filter(
+            CompanyProfile.ticker == ticker,
+            CompanyProfile.source == "manual",
+        ).order_by(CompanyProfile.profile_date.desc(), CompanyProfile.id.desc()).first()
+        if profile is None:
+            profile = db.query(CompanyProfile).filter(
+            CompanyProfile.ticker == ticker,
+            CompanyProfile.source == "fmp",
+            ).order_by(CompanyProfile.profile_date.desc(), CompanyProfile.id.desc()).first()
+        peers_json = profile.peers_json if profile else None
+        if isinstance(peers_json, dict):
+            manual_peers = [p.upper() for p in peers_json.get("manual", []) if p]
+        elif isinstance(peers_json, list):
+            # Legacy list values are treated as reference-only, not manual.
+            manual_peers = []
+
+        if not manual_peers:
+            return {"peers": [], "median_pe": None, "cap_weighted_pe": None,
+                    "median_peg": None, "growth_adjusted_pe": None,
+                    "method": "manual_peers_required"}
+
+        cached = db.query(CompanyProfile).filter(
+            CompanyProfile.ticker == ticker,
+            CompanyProfile.profile_date == today,
+            CompanyProfile.source == "manual_peer_fmp",
+        ).first()
+        if cached and cached.raw_data_json and data_pull_log_repository.has_success(
+            db, ticker, "peer_comparison", "fmp", today
+        ):
+            return cached.raw_data_json
+
     from app.logic.data_sources.fmp import get_peer_forward_pe
-    return await get_peer_forward_pe(ticker, ticker_eps_growth=ticker_eps_growth, industry=industry)
+    data = await get_peer_forward_pe(
+        ticker,
+        ticker_eps_growth=ticker_eps_growth,
+        industry=industry,
+        peers=manual_peers,
+    )
+
+    if db is not None:
+        from app.db.financial import CompanyProfile
+        from app.repositories import data_pull_log_repository
+
+        today = data_pull_log_repository.today_str()
+        row = db.query(CompanyProfile).filter(
+            CompanyProfile.ticker == ticker,
+            CompanyProfile.profile_date == today,
+            CompanyProfile.source == "manual_peer_fmp",
+        ).first()
+        if row:
+            row.raw_data_json = data
+        else:
+            db.add(CompanyProfile(
+                ticker=ticker,
+                profile_date=today,
+                source="manual_peer_fmp",
+                sector=None,
+                industry=industry,
+                market_cap=None,
+                current_price=None,
+                shares_outstanding=None,
+                peers_json=data.get("peers", []) if isinstance(data, dict) else [],
+                raw_data_json=data,
+            ))
+        db.commit()
+        data_pull_log_repository.mark(
+            db,
+            ticker,
+            "peer_comparison",
+            "fmp",
+            "success",
+            records_inserted=1 if data else 0,
+        )
+
+    return data
 
 
 def get_forward_eps_growth(

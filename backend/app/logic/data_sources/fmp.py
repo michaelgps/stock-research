@@ -309,6 +309,7 @@ async def get_peer_forward_pe(
     ticker: str,
     ticker_eps_growth: float | None = None,
     industry: str | None = None,
+    peers: list[str] | None = None,
 ) -> dict:
     """
     Fetch peer forward P/E data with growth adjustment.
@@ -319,7 +320,7 @@ async def get_peer_forward_pe(
 
     This ensures peers growing at 20% don't inflate the P/E for a ticker growing at 10%.
     """
-    peers = await get_stock_peers(ticker, industry=industry)
+    peers = [p.upper() for p in (peers or []) if p.upper() != ticker.upper()]
     if not peers:
         return {"peers": [], "median_pe": None, "cap_weighted_pe": None,
                 "median_peg": None, "growth_adjusted_pe": None}

@@ -9,6 +9,7 @@ alembic==1.14.0
 
 # HTTP client
 httpx==0.28.1
+yfinance==0.2.66
 
 # Settings
 pydantic-settings==2.7.0

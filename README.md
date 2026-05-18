@@ -1,59 +1,105 @@
 # Stock Research - Valuation App
 
-A full-stack stock valuation tool that combines DCF (Discounted Cash Flow) and forward P/E analysis to generate bear/base/bull price targets for any publicly traded US stock.
+A full-stack stock valuation tool for US equities. It collects company financials, estimates, filings, daily market prices, and optional LLM signals, then runs a blended DCF + forward P/E valuation with persisted historical results.
 
 ## What It Does
 
 Enter a ticker symbol and the app:
 
-1. **Fetches financial data** from FMP, Finnhub, Yahoo Finance, and SEC EDGAR
-2. **Runs a DCF model** — projects revenue and free cash flow, discounts to present value
-3. **Runs a forward P/E model** — triangulates historical P/E, peer comparison, and DCF-justified P/E
-4. **Blends both models** (50/50) into bear/base/bull price targets
-5. **Shows additional analysis** — reverse DCF (implied growth), margin of safety, terminal value warning
-
-### Example Output (AAPL)
-
-| Scenario | DCF | Forward P/E | Blended |
-|----------|-----|-------------|---------|
-| Bear     | $120 | $160       | $140    |
-| Base     | $142 | $191       | $166    |
-| Bull     | $165 | $225       | $195    |
-
-Plus: reverse DCF shows the market implies ~21% revenue growth, margin of safety verdict, and terminal value sensitivity warning.
+1. Fetches company, financial, estimate, filing, and market price data from SEC EDGAR, FMP, Finnhub, Yahoo Finance, and optional FRED.
+2. Stores all historical data in PostgreSQL `tb_` tables instead of overwriting old periods.
+3. Runs a DCF model using annual financial reports, analyst revenue estimates, FCF margins, and CAPM-style WACC.
+4. Runs a forward P/E model using historical P/E, DCF-justified P/E, and manual peer comparison when manual peers are configured.
+5. Saves each valuation result by ticker, valuation date, and model version.
 
 ## Architecture
 
-```
-backend/                  # FastAPI (Python 3.12)
+```text
+backend/                         # FastAPI (Python 3.12)
   app/
-    api/routes.py         # REST endpoints
-    config/               # Settings, database config
-    data_structure/        # Pydantic models (financial, valuation, signals)
-    db/                   # SQLAlchemy models + DB read/write
+    api/routes.py                # REST endpoints
+    config/                      # Settings and database config
+    data_structure/              # Pydantic models
+    db/financial.py              # SQLAlchemy table models
+    repositories/                # One repository per table
+    services/                    # Data persistence orchestration
     logic/
-      data_aggregator.py  # Orchestrates data collection from all sources
-      data_sources/       # FMP, Finnhub, Yahoo Finance, SEC EDGAR clients
-      valuation/
-        assumptions.py    # WACC (CAPM + levered beta), growth, margins
-        dcf.py            # DCF model
-        multiples.py      # Forward P/E triangulation
-        engine.py         # Orchestrator: runs DCF + P/E, blends, adds analysis
-      llm_extraction/     # LLM signal extraction from filings/transcripts
+      data_aggregator.py         # Data collection facade
+      data_sources/              # FMP, Finnhub, Yahoo Finance, SEC EDGAR clients
+      valuation/                 # DCF, assumptions, multiples, valuation engine
+      llm_extraction/            # Optional LLM signal extraction
 
-frontend/                 # React + TypeScript + Vite
+frontend/                        # React + TypeScript + Vite
   src/
-    components/           # UI components (ticker input, valuation summary, charts)
-    services/api.ts       # API client
-    types/                # TypeScript type definitions
+    components/                  # UI components
+    services/api.ts              # API client
+    types/                       # TypeScript types
+```
+
+## Database Design
+
+The current schema is built around historical persistence. Data is not overwritten across reporting periods or valuation dates; repeated pulls on the same ticker/source/day update the same daily row.
+
+| Table | Purpose |
+|---|---|
+| `tb_company` | Stable company identity such as ticker, name, CIK, exchange, currency, and country |
+| `tb_company_profile` | Daily company profile records from FMP/Finnhub/manual sources, including sector, industry, market cap, price, shares, and peer metadata |
+| `tb_financial_report` | Annual/quarterly financial statements by ticker, source, period type, fiscal year, and quarter |
+| `tb_estimate` | Analyst estimates, earnings surprises, and EPS validation records for company tickers |
+| `tb_market_price` | Daily OHLCV market prices, primarily from Yahoo Finance via `yfinance` |
+| `tb_filing` | SEC filing text sections and user-submitted text materials |
+| `tb_valuation` | Saved valuation results by ticker, valuation date, and model version |
+| `tb_data_pull_log` | Per-day source pull status, inserted/updated counts, and errors |
+
+`tb_data_pull_log.status` uses:
+
+| Status | Meaning |
+|---|---|
+| `success` | Valid parsed records were inserted or updated |
+| `empty` | The provider returned no usable records, so future pulls are not blocked |
+| `failed` | The provider call or parser failed |
+
+## Data Sources
+
+| Data | Source | Notes |
+|---|---|---|
+| Company identity | SEC EDGAR | Primary identity and CIK lookup |
+| Company profile | FMP, Finnhub | FMP is preferred for market cap/current price when available |
+| Financial reports | SEC EDGAR, FMP fallback | SEC annual statements are preferred |
+| Analyst estimates | FMP, Finnhub | Used for forward revenue/EPS assumptions |
+| Earnings surprises | FMP, Finnhub | Empty provider responses are logged as `empty`, not `success` |
+| Daily OHLCV | Yahoo Finance via `yfinance` | Used to reduce quota pressure on paid APIs |
+| SEC text | SEC EDGAR | MD&A and risk factors from 10-K |
+| Risk-free rate | FRED optional | Falls back to the model default if unavailable; macro rates are not stored in `tb_estimate` |
+
+## Peer Policy
+
+Peer valuation only uses manually configured peers. API-returned peers are stored as reference metadata only and are not used in the valuation model.
+
+If no manual peers exist for a ticker, the peer component is skipped and the P/E model reweights the remaining available inputs.
+
+Set manual peers with:
+
+```bash
+curl -X PUT http://localhost:8000/api/peers/AAPL \
+  -H "Content-Type: application/json" \
+  -d "{\"peers\":[\"MSFT\",\"GOOGL\"]}"
+```
+
+Clear manual peers with:
+
+```bash
+curl -X PUT http://localhost:8000/api/peers/AAPL \
+  -H "Content-Type: application/json" \
+  -d "{\"peers\":[]}"
 ```
 
 ## Prerequisites
 
-- **Python 3.12+**
-- **Node.js 18+**
-- **PostgreSQL 16** (or Docker)
-- **API Keys** (see below)
+- Python 3.12+
+- Node.js 18+
+- PostgreSQL 16 or Docker
+- API keys for FMP and optional providers
 
 ## Setup
 
@@ -65,52 +111,43 @@ Start PostgreSQL via Docker:
 docker-compose up -d
 ```
 
-Or use an existing PostgreSQL instance. Default connection: `postgresql://postgres:123123@localhost:5432/stockapp`
+Default connection:
+
+```text
+postgresql://postgres:123123@localhost:5432/stockapp
+```
 
 ### 2. Environment Variables
 
-Copy the example and fill in your API keys:
+Copy the example file:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
+Then fill in your keys:
 
 ```env
-# Required
-FMP_API_KEY=your_key_here          # https://financialmodelingprep.com/developer
-
-# Optional (enhance results)
-FINNHUB_API_KEY=your_key_here      # https://finnhub.io/
-ANTHROPIC_API_KEY=your_key_here    # https://console.anthropic.com/ (for LLM signals)
-FRED_API_KEY=your_key_here         # https://fred.stlouisfed.org/docs/api/api_key.html
+DATABASE_URL=postgresql://postgres:123123@localhost:5432/stockapp
+FMP_API_KEY=your_fmp_api_key_here
+FINNHUB_API_KEY=your_finnhub_api_key_here
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+FRED_API_KEY=your_fred_api_key_here
+APP_ENV=development
+LOG_LEVEL=INFO
 ```
-
-| Key | Required | Free Tier | What It Does |
-|-----|----------|-----------|--------------|
-| `FMP_API_KEY` | Yes | 250 calls/day | Financial statements, analyst estimates, peer data |
-| `FINNHUB_API_KEY` | No | 60 calls/min | Analyst recommendations, earnings surprises |
-| `ANTHROPIC_API_KEY` | No | Pay-per-use | LLM extraction from MD&A, risk factors, transcripts |
-| `FRED_API_KEY` | No | Unlimited | Live 10Y Treasury yield for risk-free rate |
 
 ### 3. Backend
 
 ```bash
 cd backend
 python -m venv venv
-
-# Windows
 venv\Scripts\activate
-
-# macOS/Linux
-source venv/bin/activate
-
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-The database tables are created automatically on first startup.
+Database tables are created automatically on first startup.
 
 ### 4. Frontend
 
@@ -120,71 +157,96 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 in your browser.
+Open `http://localhost:5173`.
 
-## Usage
-
-### Quick Start (UI)
-
-1. Open http://localhost:5173
-2. Enter a ticker (e.g., `AAPL`)
-3. Click **Fetch Data** to load financial data
-4. Click **Run Valuation** to get price targets
-
-### API Endpoints
+## API Endpoints
 
 | Method | Endpoint | Description |
-|--------|----------|-------------|
+|---|---|---|
 | `GET` | `/health` | Health check |
-| `GET/POST` | `/api/financial-data/{ticker}` | Fetch all financial data |
-| `POST` | `/api/text-materials` | Submit earnings transcript or notes |
-| `GET` | `/api/text-materials/{ticker}` | Get submitted text materials |
-| `POST` | `/api/extract-signals/{ticker}` | Run LLM signal extraction |
-| `GET/POST` | `/api/valuation/{ticker}` | Run full valuation |
+| `POST` | `/api/financial-data` | Fetch financial data by JSON body |
+| `GET` | `/api/financial-data/{ticker}` | Fetch financial data by ticker |
+| `POST` | `/api/text-materials` | Submit transcript or manual notes |
+| `GET` | `/api/text-materials/{ticker}` | Read submitted text materials |
+| `DELETE` | `/api/text-materials/{ticker}` | Clear submitted text materials |
+| `PUT` | `/api/peers/{ticker}` | Set or clear manual peers |
+| `POST` | `/api/extract-signals/{ticker}` | Run optional LLM signal extraction |
+| `GET` | `/api/extract-signals/{ticker}` | Read cached LLM signals |
+| `POST` | `/api/valuation/{ticker}` | Run valuation and save result |
+| `GET` | `/api/valuation/{ticker}` | Convenience valuation endpoint |
 
-### Example API Call
+Example:
 
 ```bash
-# Run valuation for Apple
-curl -X POST http://localhost:8000/api/valuation/AAPL | python -m json.tool
+curl -X POST http://localhost:8000/api/valuation/AAPL
 ```
 
 ## Valuation Methodology
 
 ### DCF Model
 
-1. **Revenue projection** — Uses analyst consensus revenue estimates (FMP) for up to 5 years, falls back to historical CAGR
-2. **FCF projection** — Applies historical average FCF margin to projected revenue
-3. **WACC** — CAPM with:
-   - Risk-free rate from FRED API (10Y Treasury, live)
-   - Levered beta via Hamada equation (unlever sector beta, relever with company D/E)
-   - Market cap (not book equity) for capital structure weights
-4. **Terminal value** — Gordon Growth Model at 3% perpetual growth
-5. **Enterprise value** — PV of projected FCFs + PV of terminal value
-6. **Per-share value** — (Enterprise value - net debt) / diluted shares
+The DCF model projects revenue and free cash flow, discounts them by WACC, adds terminal value, subtracts net debt, and divides by diluted shares.
+
+Primary assumptions:
+
+| Input | Method |
+|---|---|
+| Revenue growth | Analyst next-FY revenue estimate when available, otherwise historical CAGR, otherwise default |
+| FCF margin | Historical average FCF margin, otherwise default |
+| WACC | CAPM with levered beta, market-cap capital structure, optional FRED 10Y Treasury risk-free rate |
+| Terminal growth | Scenario-based Gordon Growth assumption with safety clamp |
 
 ### Forward P/E Model
 
-P/E multiple is triangulated from three sources (weighted):
-- **50% Historical** — Average trailing P/E from 5 years of daily prices
-- **30% Peer** — Median forward P/E of industry peers, PEG-adjusted for growth
-- **20% Justified** — DCF intrinsic value / forward EPS (cross-check)
+The P/E model combines available inputs and reweights automatically when an input is missing:
 
-Applied to forward EPS (analyst consensus) to get per-share value.
+| Component | Default Weight | Notes |
+|---|---:|---|
+| Historical P/E | 50% | Uses daily Yahoo Finance prices and annual EPS history |
+| Manual peer P/E | 30% | Only runs when manual peers are configured |
+| DCF-justified P/E | 20% | DCF base value divided by forward EPS |
 
-### Additional Analysis
+Forward EPS comes from analyst estimates and is cross-checked with Yahoo Finance when available.
 
-- **Reverse DCF** — Back-solves the revenue growth rate implied by the current market price
-- **Margin of Safety** — Compares intrinsic value to market price (undervalued / fairly valued / overvalued)
-- **Terminal Value Warning** — Flags when terminal value exceeds 75% of enterprise value
-- **LLM Signals** (optional) — Extracts sentiment from MD&A, risk factors, and earnings call transcripts to nudge assumptions
+### Saved Results
+
+Each valuation is saved into `tb_valuation` using:
+
+```text
+ticker + valuation_date + model_version
+```
+
+Multiple runs on the same day/model update the same row; valuations on different dates are preserved.
+
+## Testing Useful Commands
+
+Backend compile check:
+
+```bash
+cd backend
+venv\Scripts\python.exe -m compileall app
+```
+
+Health check through FastAPI TestClient:
+
+```bash
+cd backend
+venv\Scripts\python.exe -c "from fastapi.testclient import TestClient; from app.main import app; r=TestClient(app).get('/health'); print(r.status_code, r.json())"
+```
+
+Inspect PostgreSQL tables:
+
+```bash
+docker exec stock-research-db-1 psql -U postgres -d stockapp -c "\dt"
+```
 
 ## Known Limitations
 
-- **Peer selection** — Uses FMP's peer API which groups by industry, not by business model. Can produce poor comparisons (e.g., NVDA grouped with AAPL instead of AMD).
-- **Negative earnings** — Companies with negative FCF margins (e.g., MU in a cyclical trough) produce $0 DCF values. An EV/Sales fallback is not yet implemented.
-- **50/50 blend** — The fixed DCF/P/E weighting doesn't suit all companies. High-growth, low-FCF companies (NVDA, TSLA) are better served by higher P/E weight.
-- **FMP rate limits** — Free tier allows 250 calls/day. Each valuation uses ~20+ calls (financial data + peers + daily prices). Daily prices are cached in the database to reduce API usage.
+- The project currently uses SQLAlchemy `create_all`; production migrations should be added with Alembic before schema changes are shared broadly.
+- FMP and Finnhub may return empty data or provider-specific errors depending on the subscription tier.
+- Manual peers are required for peer valuation. This avoids poor automated peer choices, but requires user curation.
+- FRED is optional. If unavailable, the model uses the default risk-free rate.
+- The frontend still reflects the current MVP flow and may need UI updates for manual peer management and database inspection.
 
 ## License
 

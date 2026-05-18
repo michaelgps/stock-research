@@ -47,18 +47,25 @@ SECTOR_DEBT_TO_EQUITY = {
 _cached_risk_free_rate: float | None = None
 
 
-async def _fetch_risk_free_rate() -> float:
+async def _fetch_risk_free_rate(db=None) -> float:
     """
     Fetch the latest 10-Year US Treasury yield from FRED (series DGS10).
     Falls back to DEFAULT_RISK_FREE_RATE on any error.
     Uses a module-level cache so we only call FRED once per process lifetime.
+    The value is stored in each valuation result's assumptions/data_quality,
+    not in tb_estimate, because it is a macro input rather than a company
+    analyst estimate.
     """
     global _cached_risk_free_rate
     if _cached_risk_free_rate is not None:
         return _cached_risk_free_rate
 
     from app.config.config import get_settings
-    api_key = get_settings().fred_api_key or "DEMO_KEY"
+    api_key = get_settings().fred_api_key
+    if not api_key:
+        _cached_risk_free_rate = DEFAULT_RISK_FREE_RATE
+        return DEFAULT_RISK_FREE_RATE
+
     url = (
         "https://api.stlouisfed.org/fred/series/observations"
         f"?series_id=DGS10&sort_order=desc&limit=5"
@@ -210,6 +217,7 @@ async def _estimate_wacc(
     statements: list[FinancialStatementData],
     sector: str | None,
     market_cap: float | None = None,
+    db=None,
 ) -> tuple[float, dict]:
     """
     Estimate WACC using:
@@ -219,7 +227,7 @@ async def _estimate_wacc(
 
     Returns (wacc, wacc_details).
     """
-    risk_free_rate = await _fetch_risk_free_rate()
+    risk_free_rate = await _fetch_risk_free_rate(db=db)
     tax_rate = 0.21  # US corporate
     cost_of_debt_pretax = 0.05  # assume ~5%
     cost_of_debt = cost_of_debt_pretax * (1 - tax_rate)
@@ -376,7 +384,8 @@ def get_forward_eps(estimates: list[AnalystEstimateData]) -> float | None:
 async def build_scenarios(
     data: FinancialDataResponse,
     signals: ExtractionResult | None,
-) -> tuple[ScenarioAssumptions, ScenarioAssumptions, ScenarioAssumptions, dict, dict]:
+    db=None,
+) -> tuple[ScenarioAssumptions, ScenarioAssumptions, ScenarioAssumptions, dict, dict, list[float]]:
     """
     Build bear/base/bull ScenarioAssumptions from financial data + signals.
     Returns (bear, base, bull, signal_adjustments, data_quality).
@@ -417,7 +426,7 @@ async def build_scenarios(
 
     # --- Base WACC (now uses market cap + levered beta + FRED rate) ---
     base_wacc, wacc_details = await _estimate_wacc(
-        recent, data.company.sector, data.company.market_cap
+        recent, data.company.sector, data.company.market_cap, db=db
     )
     data_quality["wacc_method"] = "capm_levered_beta_market_cap"
     data_quality["wacc_details"] = wacc_details

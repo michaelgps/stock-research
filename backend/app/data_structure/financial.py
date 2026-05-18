@@ -83,3 +83,7 @@ class TextSubmitRequest(BaseModel):
     ticker: str
     source_type: str  # "earnings_transcript" or "manual"
     content: str
+
+
+class PeerUpdateRequest(BaseModel):
+    peers: list[str]

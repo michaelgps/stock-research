@@ -58,7 +58,7 @@ async def run_valuation(
         raise ValueError("Cannot run valuation: no share count available")
 
     # --- Build DCF assumptions ---
-    bear_a, base_a, bull_a, signal_adj, data_quality, analyst_revenues = await build_scenarios(data, signals)
+    bear_a, base_a, bull_a, signal_adj, data_quality, analyst_revenues = await build_scenarios(data, signals, db=db)
     if analyst_revenues:
         data_quality["dcf_revenue_source"] = f"analyst_consensus_{len(analyst_revenues)}_years"
     else:
@@ -102,8 +102,68 @@ async def run_valuation(
 
     # --- Cross-validate FMP EPS with Yahoo Finance ---
     try:
-        from app.logic.data_sources.yfinance_client import cross_validate_eps
-        yf_validation = cross_validate_eps(forward_eps, data.company.ticker)
+        yf_validation = None
+        if db is not None:
+            from app.db.financial import Estimate
+            from app.repositories import data_pull_log_repository
+
+            today = data_pull_log_repository.today_str()
+            cached_yf = db.query(Estimate).filter(
+                Estimate.ticker == data.company.ticker,
+                Estimate.estimate_date == today,
+                Estimate.source == "yfinance",
+                Estimate.estimate_period == "eps_validation",
+            ).first()
+            if cached_yf and cached_yf.raw_data_json and data_pull_log_repository.has_success(
+                db, data.company.ticker, "eps_validation", "yfinance", today
+            ):
+                yf_validation = cached_yf.raw_data_json
+
+        if yf_validation is None:
+            from app.logic.data_sources.yfinance_client import cross_validate_eps
+            yf_validation = cross_validate_eps(forward_eps, data.company.ticker)
+            if db is not None:
+                from app.db.financial import Estimate
+                from app.repositories import data_pull_log_repository
+
+                today = data_pull_log_repository.today_str()
+                row = db.query(Estimate).filter(
+                    Estimate.ticker == data.company.ticker,
+                    Estimate.estimate_date == today,
+                    Estimate.source == "yfinance",
+                    Estimate.estimate_period == "eps_validation",
+                ).first()
+                values = {
+                    "record_type": "eps_validation",
+                    "revenue_estimate": None,
+                    "eps_estimate": yf_validation.get("yf_current_fy_eps"),
+                    "revenue_growth_estimate": None,
+                    "actual_eps": None,
+                    "estimated_eps": None,
+                    "surprise": None,
+                    "surprise_percent": None,
+                    "buy_count": None,
+                    "hold_count": None,
+                    "sell_count": None,
+                    "target_price": None,
+                    "raw_data_json": yf_validation,
+                }
+                if row:
+                    for key, value in values.items():
+                        setattr(row, key, value)
+                else:
+                    db.add(Estimate(
+                        ticker=data.company.ticker,
+                        estimate_date=today,
+                        source="yfinance",
+                        estimate_period="eps_validation",
+                        **values,
+                    ))
+                db.commit()
+                data_pull_log_repository.mark(
+                    db, data.company.ticker, "eps_validation", "yfinance", "success", records_inserted=1
+                )
+
         data_quality["yf_cross_validation"] = yf_validation
         if yf_validation.get("warning"):
             logger.warning(
@@ -118,7 +178,12 @@ async def run_valuation(
         data_quality["yf_cross_validation"] = "error"
 
     # --- Fetch peer forward P/E (with growth adjustment) ---
-    peer_pe_data = await fetch_peer_pe(data.company.ticker, ticker_eps_growth=fwd_eps_growth, industry=data.company.industry)
+    peer_pe_data = await fetch_peer_pe(
+        data.company.ticker,
+        ticker_eps_growth=fwd_eps_growth,
+        industry=data.company.industry,
+        db=db,
+    )
     peer_comparison = None
     if peer_pe_data and peer_pe_data.get("peers"):
         peer_comparison = PeerComparison(
@@ -134,7 +199,11 @@ async def run_valuation(
             data_quality["peer_growth_adjusted_pe"] = peer_pe_data["growth_adjusted_pe"]
             data_quality["peer_median_peg"] = peer_pe_data.get("median_peg")
     else:
-        data_quality["peer_comparison"] = "not_available"
+        method = peer_pe_data.get("method") if peer_pe_data else None
+        if method == "manual_peers_required":
+            data_quality["peer_comparison"] = "skipped_no_manual_peers"
+        else:
+            data_quality["peer_comparison"] = "not_available"
 
     # --- Run base DCF first to compute justified P/E ---
     base_dcf = run_dcf(base_a, latest_revenue, net_debt, shares, analyst_revenues=analyst_revenues or None)

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.config.database import get_db
 from app.data_structure.financial import (
     FinancialDataResponse,
+    PeerUpdateRequest,
     TickerRequest,
     TextSubmitRequest,
     TextMaterial,
@@ -15,6 +16,7 @@ from app.logic.llm_extraction.extractor import extract_signals
 from app.logic.valuation import run_valuation
 from app.db.financial_store import save_user_text, get_user_texts, clear_user_texts, save_valuation_result
 from app.db.signal_store import load_cached_signals, save_signals_to_cache
+from app.repositories.company_profile_repository import set_manual_peers
 
 router = APIRouter()
 
@@ -96,6 +98,23 @@ async def delete_text_materials(ticker: str, db: Session = Depends(get_db)):
     ticker = ticker.strip().upper()
     clear_user_texts(db, ticker)
     return {"status": "ok", "ticker": ticker}
+
+
+@router.put("/api/peers/{ticker}")
+async def update_manual_peers(ticker: str, request: PeerUpdateRequest, db: Session = Depends(get_db)):
+    """Set manual peers. Only manual peers are used in peer valuation."""
+    ticker = ticker.strip().upper()
+    if not ticker or len(ticker) > 10:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+
+    peers = [p.strip().upper() for p in request.peers if p.strip()]
+    if len(peers) > 12:
+        raise HTTPException(status_code=400, detail="Too many peers (max 12)")
+    if ticker in peers:
+        peers = [p for p in peers if p != ticker]
+
+    set_manual_peers(db, ticker, peers)
+    return {"status": "ok", "ticker": ticker, "peers": peers}
 
 
 @router.post("/api/extract-signals/{ticker}", response_model=ExtractionResult)
