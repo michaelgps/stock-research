@@ -1,34 +1,45 @@
 """
-Forward P/E valuation with triangulation.
+Forward P/E valuation from the ticker's historical P/E distribution.
 
-P/E is determined by triangulating standalone market multiple sources:
-  (a) Historical trailing P/E distribution (yearly high/low/avg from daily prices)
-  (b) Peer forward P/E (median + cap-weighted from FMP peers)
+P/E is determined from the last ~5 fiscal years of daily trailing P/E:
+  bear = P25
+  base = P50 / median
+  bull = P75
 
 Note on denominator mismatch: historical P/E uses trailing EPS (net income /
 diluted shares from filings), but we apply it to forward EPS. This is a known
-limitation — ideally we'd use historical forward P/E, but that requires
-I/B/E/S-style historical consensus data we don't have. The growth adjustment
-partially compensates for this gap.
+limitation: ideally we'd use historical forward P/E, but that requires
+I/B/E/S-style historical consensus data we don't have.
 
-All math is deterministic — no LLM calls.
+All math is deterministic; no LLM calls.
 """
 
-import logging
 from datetime import date as dt_date
 
 from app.data_structure.financial import (
+    AnalystEstimateData,
     FinancialDataResponse,
     FinancialStatementData,
-    AnalystEstimateData,
 )
 from app.data_structure.valuation import MultiplesResult
 
-logger = logging.getLogger(__name__)
+
+def _percentile(values: list[float], percentile: float) -> float:
+    """Linear-interpolated percentile for deterministic valuation math."""
+    clean = sorted(v for v in values if v is not None and v > 0)
+    if not clean:
+        return 0
+    if len(clean) == 1:
+        return clean[0]
+    rank = (len(clean) - 1) * percentile
+    lower = int(rank)
+    upper = min(lower + 1, len(clean) - 1)
+    weight = rank - lower
+    return clean[lower] * (1 - weight) + clean[upper] * weight
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Compute yearly high/low/avg P/E from daily prices + annual EPS
+# Step 1: Compute yearly P/E distribution from daily prices + annual EPS
 # ---------------------------------------------------------------------------
 
 def compute_yearly_pe_ranges(
@@ -36,33 +47,30 @@ def compute_yearly_pe_ranges(
     statements: list[FinancialStatementData],
 ) -> list[dict]:
     """
-    For each fiscal year with EPS data, find the stock's high/low/avg price
-    during that fiscal year and compute high/low/avg P/E.
+    For each fiscal year with EPS data, compute daily trailing P/E values.
 
-    Returns list of {"fy": int, "eps": float, "pe_low": float, "pe_high": float, "pe_avg": float}
+    Each row includes a private pe_daily_values list so aggregate 5-year
+    P25/P50/P75 can be computed internally. The API response strips that list.
     """
-    # Build EPS per fiscal year
     annual = [s for s in statements if s.period == "annual"]
     annual.sort(key=lambda s: s.fiscal_year, reverse=True)
 
     fy_eps = {}
-    for s in annual[:5]:
-        if s.net_income and s.diluted_shares and s.diluted_shares > 0:
-            eps = s.net_income / s.diluted_shares
+    for statement in annual[:5]:
+        if statement.net_income and statement.diluted_shares and statement.diluted_shares > 0:
+            eps = statement.net_income / statement.diluted_shares
             if eps > 0:
-                fy_eps[s.fiscal_year] = {"eps": eps, "end_date": s.date}
+                fy_eps[statement.fiscal_year] = {"eps": eps, "end_date": statement.date}
 
     if not fy_eps or not daily_prices:
         return []
 
-    # Index daily prices by date string
     price_by_date = {}
-    for p in daily_prices:
-        d = p.get("date", "")
-        if d:
-            price_by_date[d] = p
+    for price in daily_prices:
+        date_text = price.get("date", "")
+        if date_text:
+            price_by_date[date_text] = price
 
-    # For each FY, find prices in the ~12 months before fiscal year end
     results = []
     for fy, info in sorted(fy_eps.items(), reverse=True):
         eps = info["eps"]
@@ -73,15 +81,14 @@ def compute_yearly_pe_ranges(
             continue
         fy_start = fy_end.replace(year=fy_end.year - 1)
 
-        # Collect all daily prices in this fiscal year window
         year_prices = []
-        for d_str, p in price_by_date.items():
+        for date_text, price in price_by_date.items():
             try:
-                d = dt_date.fromisoformat(d_str)
+                price_date = dt_date.fromisoformat(date_text)
             except ValueError:
                 continue
-            if fy_start <= d <= fy_end:
-                year_prices.append(p)
+            if fy_start <= price_date <= fy_end:
+                year_prices.append(price)
 
         if not year_prices:
             continue
@@ -93,131 +100,69 @@ def compute_yearly_pe_ranges(
         if not highs or not lows or not closes:
             continue
 
-        pe_high = max(highs) / eps
-        pe_low = min(lows) / eps
-        pe_avg = (sum(closes) / len(closes)) / eps
+        pe_daily_values = [close / eps for close in closes if close > 0]
+        if not pe_daily_values:
+            continue
 
         results.append({
             "fy": fy,
             "eps": round(eps, 2),
-            "pe_low": round(pe_low, 1),
-            "pe_high": round(pe_high, 1),
-            "pe_avg": round(pe_avg, 1),
+            "pe_low": round(min(lows) / eps, 1),
+            "pe_high": round(max(highs) / eps, 1),
+            "pe_avg": round((sum(closes) / len(closes)) / eps, 1),
+            "pe_p25": round(_percentile(pe_daily_values, 0.25), 1),
+            "pe_p50": round(_percentile(pe_daily_values, 0.50), 1),
+            "pe_p75": round(_percentile(pe_daily_values, 0.75), 1),
             "price_high": round(max(highs), 2),
             "price_low": round(min(lows), 2),
+            "pe_daily_values": [round(value, 2) for value in pe_daily_values],
         })
 
     return results
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Determine P/E multiple via triangulation
+# Step 2: Determine P/E multiple from historical percentiles
 # ---------------------------------------------------------------------------
 
 def determine_pe_multiple(
     yearly_pe_ranges: list[dict],
-    forward_eps_growth: float | None,
     peer_pe_data: dict | None,
     scenario: str,
 ) -> tuple[float, dict]:
     """
-    Determine forward P/E multiple by triangulating:
-      (a) Historical trailing P/E distribution (yearly ranges)
-      (b) Peer forward P/E (median from FMP peers)
+    Determine forward P/E multiple from the ticker's own 5-year historical P/E.
 
-    Bear = weighted low estimate
-    Base = weighted central estimate
-    Bull = weighted high estimate
+    Bear = 25th percentile, Base = median, Bull = 75th percentile.
     """
     details = {}
-    estimates = []  # list of (pe_value, weight, label)
+    pe_values: list[float] = []
+    for row in yearly_pe_ranges or []:
+        pe_values.extend(row.get("pe_daily_values") or [])
 
-    # --- (a) Historical P/E from yearly ranges ---
-    if yearly_pe_ranges and len(yearly_pe_ranges) >= 2:
-        avg_pe_low = sum(r["pe_low"] for r in yearly_pe_ranges) / len(yearly_pe_ranges)
-        avg_pe_high = sum(r["pe_high"] for r in yearly_pe_ranges) / len(yearly_pe_ranges)
-        avg_pe_avg = sum(r["pe_avg"] for r in yearly_pe_ranges) / len(yearly_pe_ranges)
-
-        details["hist_pe_low_avg"] = round(avg_pe_low, 1)
-        details["hist_pe_high_avg"] = round(avg_pe_high, 1)
-        details["hist_pe_avg"] = round(avg_pe_avg, 1)
-        details["hist_years_used"] = len(yearly_pe_ranges)
-
-        # Growth adjustment: compare forward EPS growth to historical EPS growth
-        growth_adj = 0.0
-        if forward_eps_growth is not None:
-            sorted_by_fy = sorted(yearly_pe_ranges, key=lambda r: r["fy"])
-            oldest_eps = sorted_by_fy[0]["eps"]
-            newest_eps = sorted_by_fy[-1]["eps"]
-            years_span = sorted_by_fy[-1]["fy"] - sorted_by_fy[0]["fy"]
-            if years_span > 0 and oldest_eps > 0:
-                hist_eps_growth = (newest_eps / oldest_eps) ** (1 / years_span) - 1
-            else:
-                hist_eps_growth = 0
-
-            growth_diff = forward_eps_growth - hist_eps_growth
-            # Each 1pp faster growth nudges P/E by ~0.5x, capped at ±15%
-            growth_adj = growth_diff * 50
-            max_adj = avg_pe_avg * 0.15
-            growth_adj = max(-max_adj, min(growth_adj, max_adj))
-
-            details["hist_eps_growth"] = f"{round(hist_eps_growth * 100, 1)}%"
-            details["fwd_eps_growth"] = f"{round(forward_eps_growth * 100, 1)}%"
-            details["growth_adjustment"] = round(growth_adj, 1)
-
-        hist_scenario = {
-            "bear": avg_pe_low + growth_adj,
-            "base": avg_pe_avg + growth_adj,
-            "bull": avg_pe_high + growth_adj,
-        }
-        estimates.append((hist_scenario[scenario], 0.5, "historical"))
-
-    # --- (b) Peer forward P/E (growth-adjusted via PEG) ---
-    if peer_pe_data and peer_pe_data.get("median_pe"):
-        raw_median = peer_pe_data["median_pe"]
-        details["peer_median_pe_raw"] = raw_median
-        details["peer_cap_weighted_pe"] = peer_pe_data.get("cap_weighted_pe")
-        details["peer_count"] = len(peer_pe_data.get("peers", []))
-
-        # Prefer growth-adjusted P/E (median_PEG × ticker growth) over raw median
-        growth_adj_pe = peer_pe_data.get("growth_adjusted_pe")
-        if growth_adj_pe is not None and growth_adj_pe > 0:
-            peer_base = growth_adj_pe
-            details["peer_median_peg"] = peer_pe_data.get("median_peg")
-            details["peer_growth_adjusted_pe"] = growth_adj_pe
-            details["peer_method"] = "peg_adjusted"
-        else:
-            # Fallback: no growth data available, use raw median
-            peer_base = raw_median
-            details["peer_method"] = "raw_median (no growth data)"
-
-        peer_spread = peer_base * 0.15
-        peer_scenario = {
-            "bear": peer_base - peer_spread,
-            "base": peer_base,
-            "bull": peer_base + peer_spread,
-        }
-        estimates.append((peer_scenario[scenario], 0.3, "peer"))
-
-    # --- Combine via weighted average ---
-    if estimates:
-        total_weight = sum(w for _, w, _ in estimates)
-        pe = sum(v * w for v, w, _ in estimates) / total_weight
-        details["triangulation_inputs"] = {
-            label: round(v, 1) for v, _, label in estimates
-        }
-        details["triangulation_weights"] = {
-            label: round(w / total_weight, 2) for _, w, label in estimates
-        }
-        details["method"] = "triangulation"
+    if pe_values and len(yearly_pe_ranges) >= 2:
+        p25 = _percentile(pe_values, 0.25)
+        p50 = _percentile(pe_values, 0.50)
+        p75 = _percentile(pe_values, 0.75)
+        pe = {"bear": p25, "base": p50, "bull": p75}[scenario]
+        details.update({
+            "method": "historical_pe_percentiles",
+            "hist_pe_p25": round(p25, 1),
+            "hist_pe_p50": round(p50, 1),
+            "hist_pe_p75": round(p75, 1),
+            "hist_years_used": len(yearly_pe_ranges),
+            "hist_daily_observations": len(pe_values),
+        })
     else:
-        # Last resort: no data at all, use a conservative default
         pe = {"bear": 15, "base": 18, "bull": 22}[scenario]
         details["method"] = "default_no_data"
 
-    # Sanity floor: P/E should never go below 5x (avoids nonsensical values)
-    pe = max(pe, 5.0)
+    if peer_pe_data and peer_pe_data.get("median_pe"):
+        details["peer_reference_only"] = True
+        details["peer_median_pe_raw"] = peer_pe_data.get("median_pe")
+        details["peer_count"] = len(peer_pe_data.get("peers", []))
 
+    pe = max(pe, 5.0)
     details["applied_pe"] = round(pe, 1)
     return round(pe, 1), details
 
@@ -235,17 +180,17 @@ def compute_forward_trend(
     Returns list of {"year": str, "eps": float, "implied_price": float}.
     """
     fmp_estimates = [
-        e for e in forward_estimates
-        if e.eps_estimate is not None and e.source == "fmp"
+        estimate for estimate in forward_estimates
+        if estimate.eps_estimate is not None and estimate.source == "fmp"
     ]
-    fmp_estimates.sort(key=lambda e: e.period)
+    fmp_estimates.sort(key=lambda estimate: estimate.period)
 
     trend = []
-    for est in fmp_estimates:
-        price = round(est.eps_estimate * pe_multiple, 2)
+    for estimate in fmp_estimates:
+        price = round(estimate.eps_estimate * pe_multiple, 2)
         trend.append({
-            "year": est.period,
-            "eps": round(est.eps_estimate, 2),
+            "year": estimate.period,
+            "eps": round(estimate.eps_estimate, 2),
             "implied_price": price,
         })
     return trend
@@ -285,20 +230,24 @@ async def fetch_peer_pe(
         ).order_by(CompanyProfile.profile_date.desc(), CompanyProfile.id.desc()).first()
         if profile is None:
             profile = db.query(CompanyProfile).filter(
-            CompanyProfile.ticker == ticker,
-            CompanyProfile.source == "fmp",
+                CompanyProfile.ticker == ticker,
+                CompanyProfile.source == "fmp",
             ).order_by(CompanyProfile.profile_date.desc(), CompanyProfile.id.desc()).first()
         peers_json = profile.peers_json if profile else None
         if isinstance(peers_json, dict):
             manual_peers = [p.upper() for p in peers_json.get("manual", []) if p]
         elif isinstance(peers_json, list):
-            # Legacy list values are treated as reference-only, not manual.
             manual_peers = []
 
         if not manual_peers:
-            return {"peers": [], "median_pe": None, "cap_weighted_pe": None,
-                    "median_peg": None, "growth_adjusted_pe": None,
-                    "method": "manual_peers_required"}
+            return {
+                "peers": [],
+                "median_pe": None,
+                "cap_weighted_pe": None,
+                "median_peg": None,
+                "growth_adjusted_pe": None,
+                "method": "manual_peers_required",
+            }
 
         cached = db.query(CompanyProfile).filter(
             CompanyProfile.ticker == ticker,
@@ -364,21 +313,21 @@ def get_forward_eps_growth(
     """
     Compute forward EPS growth anchored on latest actual EPS (2-year CAGR).
 
-    Uses _compute_eps_growth from fmp.py which handles:
-    - Anchoring on actual EPS instead of estimate-only CAGR
-    - Time-window adjustment (shifts forward if <6 months to next FY end)
-    - Fallback to estimate-only if no actual EPS available
+    Used for data quality and optional peer reference calculations, not for
+    setting the final historical-percentile P/E multiple.
     """
     from app.logic.data_sources.fmp import _compute_eps_growth
 
-    # Build lightweight objects matching what _compute_eps_growth expects
     class _Est:
         def __init__(self, period, eps_estimate):
             self.period = period
             self.eps_estimate = eps_estimate
 
-    fmp = [e for e in estimates if e.eps_estimate is not None and e.source == "fmp"]
-    est_objects = [_Est(e.period, e.eps_estimate) for e in fmp]
+    fmp_estimates = [
+        estimate for estimate in estimates
+        if estimate.eps_estimate is not None and estimate.source == "fmp"
+    ]
+    est_objects = [_Est(estimate.period, estimate.eps_estimate) for estimate in fmp_estimates]
 
     return _compute_eps_growth(actual_eps, fy_end_date, est_objects)
 
@@ -402,16 +351,14 @@ def run_multiples(
     scenario: str,
     forward_eps: float | None,
     yearly_pe_ranges: list[dict] | None = None,
-    forward_eps_growth: float | None = None,
     peer_pe_data: dict | None = None,
 ) -> MultiplesResult:
     """
-    Compute per-share value using forward P/E via standalone multiple inputs.
+    Compute per-share value using forward EPS and a historical-percentile P/E.
     DCF-derived justified P/E is reported only as a cross-check, not as an input.
     """
     pe_mult, details = determine_pe_multiple(
         yearly_pe_ranges or [],
-        forward_eps_growth,
         peer_pe_data,
         scenario,
     )

@@ -1,6 +1,6 @@
 import type { FinancialDataResponse, ValuationResponse } from "../types/financial";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = `${window.location.protocol}//${window.location.hostname}:8000`;
 
 async function apiGet<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`);

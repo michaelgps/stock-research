@@ -8,7 +8,7 @@ This document describes the current end-to-end valuation flow used by the app.
 |---|---|
 | Data collection | Pull company, financial, estimate, filing, and price data into PostgreSQL |
 | Optional signal extraction | Use LLM extraction on filings/transcripts when text is available |
-| Valuation | Run DCF and forward P/E as separate views, then save the valuation result |
+| Valuation | Build fiscal-year valuation windows, then save the valuation result |
 
 ## Data Persistence
 
@@ -52,13 +52,13 @@ Yahoo Finance is used for daily OHLCV to reduce quota pressure on paid APIs.
 
 ## Peer Valuation Rule
 
-Peer comparison uses manual peers only.
+Peer data is reference-only in the current model.
 
-API-returned peers may be stored as reference metadata, but they are not used in the valuation calculation. If a ticker has no manual peers, the peer component is skipped and the forward P/E model reweights the remaining components.
+API-returned peers may be stored as reference metadata, and manual peers may be inspected separately, but peer P/E does not set the final P/E multiple.
 
 ## DCF Model
 
-The DCF model runs bear/base/bull scenarios.
+The DCF model is primarily used as a base present-value reference.
 
 Main inputs:
 
@@ -80,14 +80,17 @@ DCF per share = Equity Value / diluted shares
 
 ## Forward P/E Model
 
-The forward P/E model combines standalone market multiple components:
+The forward P/E model uses the ticker's own last ~5 fiscal years of daily trailing P/E observations.
 
-| Component | Default Weight | Notes |
-|---|---:|---|
-| Historical P/E | 50% | Uses historical prices and annual EPS |
-| Manual peer P/E | 30% | Only used when manual peers exist |
+The observations are sorted and mapped to scenario percentiles:
 
-If one component is unavailable, weights are normalized across the available components.
+| Scenario | Multiple |
+|---|---|
+| Bear | P25 |
+| Base | P50 / median |
+| Bull | P75 |
+
+The raw daily P/E values are kept internal to the valuation calculation. API consumers receive yearly summary ranges and percentiles, not the full daily observation list.
 
 ```text
 Forward P/E value = next fiscal year EPS * selected P/E multiple
@@ -95,16 +98,24 @@ Forward P/E value = next fiscal year EPS * selected P/E multiple
 
 The EPS denominator is explicitly labeled as next fiscal year EPS, not NTM EPS. The API returns the fiscal year label, inferred fiscal year end date when available, source, and as-of date.
 
-DCF-implied P/E may be displayed as a cross-check, but it is not an input into the P/E multiple.
+DCF-implied P/E and peer P/E may be displayed as cross-checks, but they are not inputs into the P/E multiple.
 
 ## Separate Output
 
-The final output does not average DCF and forward P/E. It shows two standalone views:
+The final output does not average DCF and forward P/E. The primary output is a list of fiscal-year valuation windows:
 
-| View | Description |
+| Field | Description |
 |---|---|
-| `dcf_view` | Bear/base/bull intrinsic value range from DCF |
-| `pe_view` | Bear/base/bull market multiple value range from forward P/E |
+| `fiscal_year_valuation_windows` | One row per fiscal year, including FY end date, distance from valuation date, forward P/E target, DCF rolled-forward value, and P25/P50/P75 P/E scenarios |
+| `pe_scenarios` | Bear/base/bull scenario cards inside each fiscal-year window |
+| `dcf_view` | Legacy/base DCF present-value reference |
+| `pe_view` | Legacy next-fiscal-year P/E view |
+
+DCF roll-forward formula:
+
+```text
+DCF Rolled-Forward Value = DCF Present Value Today * (1 + WACC) ^ years_to_fiscal_year_end
+```
 
 ## Saved Valuation
 

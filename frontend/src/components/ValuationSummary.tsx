@@ -1,4 +1,4 @@
-import type { ValuationResponse, ValuationView } from "../types/financial";
+import type { FiscalYearValuationWindow, ValuationResponse } from "../types/financial";
 
 interface ValuationSummaryProps {
   valuation: ValuationResponse;
@@ -18,122 +18,122 @@ function upside(value: number | null): string {
   return `${pctValue >= 0 ? "+" : ""}${pctValue.toFixed(1)}%`;
 }
 
-function viewClass(view: ValuationView): string {
-  if (view.verdict === "undervalued") return "upside";
-  if (view.verdict === "overvalued") return "downside";
+function verdictClass(verdict: string | null): string {
+  if (verdict === "undervalued") return "upside";
+  if (verdict === "overvalued") return "downside";
   return "";
 }
 
+interface ValuationWindowCard {
+  title: string;
+  label: string;
+  fyWindow: FiscalYearValuationWindow | undefined;
+  badgeClass: string;
+}
+
+function ValuationWindow({ title, label, fyWindow, badgeClass, currentPrice }: ValuationWindowCard & { currentPrice: number }) {
+  const baseScenario = fyWindow?.pe_scenarios.find((scenario) => scenario.label === "base");
+
+  return (
+    <div className="valuation-view-card">
+      <div className="valuation-view-header">
+        <div>
+          <div className="valuation-view-kicker">fiscal-year valuation window</div>
+          <h4>{title}</h4>
+          <div className="valuation-period-stack">
+            <div className={`valuation-time-badge ${badgeClass}`}>
+              Valuation period: FY{fyWindow?.fiscal_year ?? "N/A"}
+              {fyWindow?.fiscal_year_end ? ` ending ${fyWindow.fiscal_year_end}` : ""} ({fyWindow?.time_distance_label ?? "date unknown"})
+            </div>
+          </div>
+        </div>
+        <div className={`valuation-view-verdict ${verdictClass(baseScenario?.verdict ?? null)}`}>
+          {baseScenario?.verdict ? baseScenario.verdict.replace(/_/g, " ") : "N/A"}
+        </div>
+      </div>
+
+      <div className="valuation-window-values">
+        <div className="valuation-window-primary">
+          <span>{label} Forward P/E target</span>
+          <strong>{money(baseScenario?.forward_pe_value)}</strong>
+          <div className="valuation-formula">
+            <b>EPS {money(fyWindow?.forward_eps)}</b>
+            <span>x</span>
+            <b>{baseScenario?.pe_multiple != null ? `${baseScenario.pe_multiple.toFixed(1)}x` : "N/A"} P/E</b>
+            <span>=</span>
+            <b>{money(baseScenario?.forward_pe_value)}</b>
+          </div>
+          <em className={verdictClass(baseScenario?.verdict ?? null)}>
+            {upside(baseScenario?.upside_pct ?? null)} vs ${currentPrice.toFixed(2)}
+          </em>
+        </div>
+        <div className="valuation-window-secondary">
+          <span>DCF rolled-forward value</span>
+          <strong>{money(fyWindow?.dcf_rolled_forward_value)}</strong>
+          <em className={verdictClass(fyWindow?.dcf_rolled_forward_verdict ?? null)}>
+            present DCF {money(fyWindow?.dcf_present_value)} compounded at {fyWindow?.discount_rate_used != null ? pct(fyWindow.discount_rate_used) : "N/A"}
+          </em>
+        </div>
+      </div>
+
+      <div className="scenario-cards scenario-cards-inline">
+        {(fyWindow?.pe_scenarios ?? []).map((scenario) => (
+          <div key={scenario.label} className={`scenario-card scenario-${scenario.label}`}>
+            <div className="scenario-label">{scenario.label}</div>
+            <div className="scenario-breakdown">
+              <div className="breakdown-row">
+                <span className="breakdown-label">Historical P/E percentile</span>
+                <span className="breakdown-value">{scenario.percentile}</span>
+              </div>
+              <div className="breakdown-row">
+                <span className="breakdown-label">P/E multiple</span>
+                <span className="breakdown-value">{scenario.pe_multiple != null ? `${scenario.pe_multiple.toFixed(1)}x` : "N/A"}</span>
+              </div>
+              <div className="breakdown-row">
+                <span className="breakdown-label">Value</span>
+                <span className="breakdown-value">{money(scenario.forward_pe_value)}</span>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <ul className="valuation-view-notes">
+        <li>Forward P/E and DCF are aligned to the same fiscal-year end date.</li>
+        <li>DCF rolled-forward uses the base DCF WACC; it is not blended with P/E.</li>
+      </ul>
+    </div>
+  );
+}
+
 export function ValuationSummary({ valuation }: ValuationSummaryProps) {
-  const { bear, base, bull, current_price, dcf_view, pe_view, forward_eps_metadata } = valuation;
-  const views = [dcf_view, pe_view];
+  const { current_price, fiscal_year_valuation_windows } = valuation;
+  const valuationWindowCards: ValuationWindowCard[] = [
+    {
+      title: "Forward P/E Market Multiple",
+      label: "Next FY",
+      fyWindow: fiscal_year_valuation_windows[0],
+      badgeClass: "",
+    },
+    {
+      title: "Following FY P/E Market Multiple",
+      label: "Following FY",
+      fyWindow: fiscal_year_valuation_windows[1],
+      badgeClass: "secondary-time-badge",
+    },
+  ];
 
   return (
     <div className="valuation-summary">
       <h3>Valuation Summary</h3>
 
       <div className="valuation-framework-note">
-        DCF and Forward P/E are shown as separate valuation frameworks. The app no longer averages them into one blended target.
+        Forward P/E is shown by fiscal-year valuation period. Each window uses the ticker's 5-year historical P/E percentiles: P25, P50, and P75.
       </div>
 
-      <div className="valuation-view-grid">
-        {views.map((view) => (
-          <div key={view.methodology} className="valuation-view-card">
-            <div className="valuation-view-header">
-              <div>
-                <div className="valuation-view-kicker">{view.methodology.replace(/_/g, " ")}</div>
-                <h4>{view.label}</h4>
-              </div>
-              <div className={`valuation-view-verdict ${viewClass(view)}`}>
-                {view.verdict ? view.verdict.replace(/_/g, " ") : "N/A"}
-              </div>
-            </div>
-
-            <div className="valuation-view-base">
-              <span>Base</span>
-              <strong>{money(view.base_value)}</strong>
-              <em className={viewClass(view)}>{upside(view.upside_pct)} vs ${current_price.toFixed(2)}</em>
-            </div>
-
-            <div className="valuation-range-row">
-              <div>
-                <span>Bear</span>
-                <strong>{money(view.bear_value)}</strong>
-              </div>
-              <div>
-                <span>Bull</span>
-                <strong>{money(view.bull_value)}</strong>
-              </div>
-            </div>
-
-            <ul className="valuation-view-notes">
-              {view.notes.map((note) => (
-                <li key={note}>{note}</li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </div>
-
-      {forward_eps_metadata && (
-        <div className="forward-eps-callout">
-          <div className="forward-eps-title">Forward EPS Basis</div>
-          <div className="forward-eps-grid">
-            <div>
-              <span>Basis</span>
-              <strong>{forward_eps_metadata.basis.replace(/_/g, " ")}</strong>
-            </div>
-            <div>
-              <span>Period</span>
-              <strong>{forward_eps_metadata.period ?? "N/A"}</strong>
-            </div>
-            <div>
-              <span>FY End</span>
-              <strong>{forward_eps_metadata.fiscal_year_end ?? "N/A"}</strong>
-            </div>
-            <div>
-              <span>EPS</span>
-              <strong>{money(forward_eps_metadata.eps)}</strong>
-            </div>
-            <div>
-              <span>Source</span>
-              <strong>{forward_eps_metadata.source?.replace(/_/g, " ") ?? "N/A"}</strong>
-            </div>
-            <div>
-              <span>As of</span>
-              <strong>{forward_eps_metadata.as_of_date ?? "N/A"}</strong>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="scenario-cards split-scenario-cards">
-        {[bear, base, bull].map((s) => (
-          <div key={s.label} className={`scenario-card scenario-${s.label}`}>
-            <div className="scenario-label">{s.label}</div>
-            <div className="scenario-breakdown">
-              <div className="breakdown-row">
-                <span className="breakdown-label">DCF value</span>
-                <span className="breakdown-value">{money(s.dcf.per_share_value)}</span>
-              </div>
-              <div className="breakdown-row">
-                <span className="breakdown-label">Forward P/E value</span>
-                <span className="breakdown-value">{money(s.multiples.forward_pe_value)}</span>
-              </div>
-              {s.multiples.pe_multiple && (
-                <div className="breakdown-row">
-                  <span className="breakdown-label">P/E multiple</span>
-                  <span className="breakdown-value">{s.multiples.pe_multiple.toFixed(1)}x</span>
-                </div>
-              )}
-            </div>
-            <div className="scenario-assumptions">
-              <div>Rev growth: {pct(s.dcf.assumptions.revenue_growth_rate)}</div>
-              <div>FCF margin: {pct(s.dcf.assumptions.fcf_margin)}</div>
-              <div>WACC: {pct(s.dcf.assumptions.discount_rate)}</div>
-              <div>Terminal g: {pct(s.dcf.assumptions.terminal_growth_rate)}</div>
-            </div>
-          </div>
+      <div className="valuation-window-stack">
+        {valuationWindowCards.map((card) => (
+          <ValuationWindow key={card.label} {...card} currentPrice={current_price} />
         ))}
       </div>
 

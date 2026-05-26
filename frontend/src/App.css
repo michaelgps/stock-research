@@ -342,6 +342,13 @@ tr:hover {
   margin-bottom: 1rem;
 }
 
+.valuation-window-stack {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
 .valuation-view-card {
   padding: 1rem;
   border: 1px solid #e5e7eb;
@@ -368,6 +375,34 @@ tr:hover {
 .valuation-view-card h4 {
   margin: 0.1rem 0 0;
   font-size: 1.05rem;
+}
+
+.valuation-period-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+}
+
+.valuation-time-badge {
+  display: inline-flex;
+  padding: 0.3rem 0.55rem;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #047857;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.secondary-time-badge {
+  background: #f0f9ff;
+  color: #0369a1;
+}
+
+.muted-time-badge {
+  margin-top: 0.45rem;
+  background: #f8fafc;
+  color: #64748b;
 }
 
 .valuation-view-verdict {
@@ -409,6 +444,76 @@ tr:hover {
   font-size: 0.85rem;
   font-style: normal;
   font-weight: 700;
+}
+
+.valuation-window-values {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 0.75rem;
+  margin-bottom: 0.8rem;
+}
+
+.valuation-window-primary,
+.valuation-window-secondary {
+  padding: 0.8rem;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.valuation-window-primary {
+  background: #f0fdf4;
+}
+
+.valuation-window-secondary {
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+}
+
+.valuation-window-values span {
+  color: #64748b;
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.valuation-window-values strong {
+  display: block;
+  margin-top: 0.2rem;
+  color: #1f2937;
+  font-size: 1.45rem;
+}
+
+.valuation-window-values em {
+  display: block;
+  margin-top: 0.2rem;
+  color: #64748b;
+  font-size: 0.82rem;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.valuation-formula {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.8);
+  color: #064e3b;
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.valuation-formula span {
+  color: #64748b;
+  font-size: 1rem;
+}
+
+.scenario-cards-inline {
+  margin-bottom: 0.9rem;
 }
 
 .valuation-range-row {
@@ -853,6 +958,7 @@ tr:hover {
 
 @media (max-width: 700px) {
   .valuation-view-grid,
+  .valuation-window-values,
   .forward-eps-grid {
     grid-template-columns: 1fr;
   }

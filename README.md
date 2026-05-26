@@ -1,6 +1,6 @@
 # Stock Research - Valuation App
 
-A full-stack stock valuation tool for US equities. It collects company financials, estimates, filings, daily market prices, and optional LLM signals, then shows DCF and forward P/E as separate valuation frameworks with persisted historical results.
+A full-stack stock valuation tool for US equities. It collects company financials, estimates, filings, daily market prices, and optional LLM signals, then shows fiscal-year valuation windows that align forward P/E targets with rolled-forward DCF reference values.
 
 ## What It Does
 
@@ -8,9 +8,9 @@ Enter a ticker symbol and the app:
 
 1. Fetches company, financial, estimate, filing, and market price data from SEC EDGAR, FMP, Finnhub, Yahoo Finance, and optional FRED.
 2. Stores all historical data in PostgreSQL `tb_` tables instead of overwriting old periods.
-3. Runs a DCF model using annual financial reports, analyst revenue estimates, FCF margins, and CAPM-style WACC.
-4. Runs a standalone forward P/E model using next fiscal year EPS, historical P/E, and manual peer comparison when manual peers are configured.
-5. Shows DCF and forward P/E as separate valuation views instead of averaging them into one target.
+3. Runs a base DCF model using annual financial reports, analyst revenue estimates, FCF margins, and CAPM-style WACC.
+4. Runs a forward P/E model using next fiscal year EPS and the ticker's own historical P/E percentiles: P25, P50, and P75.
+5. Shows each fiscal-year valuation window with both a forward P/E target and a DCF value rolled forward to that same fiscal year end.
 6. Saves each valuation result by ticker, valuation date, and model version.
 
 ## Architecture
@@ -75,9 +75,9 @@ The current schema is built around historical persistence. Data is not overwritt
 
 ## Peer Policy
 
-Peer valuation only uses manually configured peers. API-returned peers are stored as reference metadata only and are not used in the valuation model.
+Peer data is reference-only in the current valuation model. API-returned peers may be stored as reference metadata, and manually configured peers may be inspected separately, but peer P/E does not set the final P/E multiple.
 
-If no manual peers exist for a ticker, the peer component is skipped and the P/E model reweights the remaining available inputs.
+The forward P/E model uses the ticker's own historical P/E distribution instead of peer weighting.
 
 Set manual peers with:
 
@@ -215,16 +215,27 @@ Revenue projection:
 | At least 5 annual analyst revenue estimates are available | Uses those year-by-year revenue estimates directly |
 | Fewer than 5 analyst revenue estimates are available | Falls back to compounding latest actual revenue by the scenario growth rate |
 
-Current DCF output appears in `dcf_view` and in each scenario's `dcf` object. It is not blended with P/E.
+DCF is primarily used as a base present-value reference. For each fiscal-year valuation window, the base DCF value is rolled forward to the fiscal year end using the base DCF WACC:
+
+```text
+DCF Rolled-Forward Value = DCF Present Value Today * (1 + WACC) ^ years_to_fiscal_year_end
+```
+
+The rolled-forward DCF value is shown next to the forward P/E target for the same fiscal year end. It is not blended with P/E.
 
 ### Forward P/E Model
 
-The P/E model combines available inputs and reweights automatically when an input is missing:
+The P/E model uses the ticker's own last ~5 fiscal years of daily trailing P/E observations.
 
-| Component | Default Weight | Notes |
-|---|---:|---|
-| Historical P/E | 50% | Uses daily Yahoo Finance prices and annual EPS history |
-| Manual peer P/E | 30% | Only runs when manual peers are configured |
+The model sorts all valid daily P/E observations and uses percentiles:
+
+| Scenario | Historical P/E multiple |
+|---|---|
+| Bear | P25, the 25th percentile |
+| Base | P50, the median |
+| Bull | P75, the 75th percentile |
+
+Daily P/E observations are internal calculation inputs only. The API returns yearly summary fields such as `pe_low`, `pe_high`, `pe_avg`, `pe_p25`, `pe_p50`, and `pe_p75`, but not the full daily observation list.
 
 Forward EPS uses the next fiscal year annual EPS estimate from FMP analyst estimates. It is not NTM EPS. The response exposes the EPS basis, fiscal year label, inferred fiscal year end date when available, source, and as-of date.
 
@@ -234,16 +245,24 @@ Forward P/E formula:
 Forward P/E Value = Next Fiscal Year EPS * Selected P/E Multiple
 ```
 
-DCF-implied P/E is only shown as a cross-check in data quality. It is not used to set the P/E multiple.
+In the UI, the base target is shown as an explicit formula, for example:
+
+```text
+EPS $8.75 * 27.8x P/E = $243.25
+```
+
+DCF-implied P/E and peer P/E are only references/cross-checks. They are not used to set the P/E multiple.
 
 ### Output Structure
 
-DCF and forward P/E are not averaged into a blended target. The valuation response shows two standalone views:
+DCF and forward P/E are not averaged into a blended target. The primary valuation response is `fiscal_year_valuation_windows`, which aligns both methods to explicit fiscal year end dates.
 
-| View | Meaning |
+| Field | Meaning |
 |---|---|
-| `dcf_view` | Intrinsic value range from discounted cash flow assumptions |
-| `pe_view` | Market multiple range from next fiscal year EPS multiplied by selected P/E multiples |
+| `fiscal_year_valuation_windows` | Per-fiscal-year windows containing forward P/E target, DCF rolled-forward value, time distance, EPS, P/E multiple, and P25/P50/P75 scenario cards |
+| `pe_scenarios` | Bear/base/bull P/E outputs inside each fiscal-year window, mapped to P25/P50/P75 |
+| `dcf_view` | Legacy/base DCF present-value reference |
+| `pe_view` | Legacy next-fiscal-year P/E view |
 | `forward_eps_metadata` | Explicit EPS basis, fiscal year period, fiscal year end, source, and as-of date |
 
 Legacy scenario fields still include `bear`, `base`, and `bull` with detailed `dcf` and `multiples` objects, but `blended_per_share` is deprecated and no longer used as the main valuation target.
@@ -290,7 +309,7 @@ docker exec stock-research-db-1 psql -U postgres -d stockapp -c "\dt"
 
 - The project currently uses SQLAlchemy `create_all`; production migrations should be added with Alembic before schema changes are shared broadly.
 - FMP and Finnhub may return empty data or provider-specific errors depending on the subscription tier.
-- Manual peers are required for peer valuation. This avoids poor automated peer choices, but requires user curation.
+- Peer data is reference-only. The current P/E multiple is based on the ticker's own historical P/E percentiles, not peers.
 - FRED is optional. If unavailable, the model uses the default risk-free rate.
 - DCF currently uses analyst revenue estimates only when at least 5 annual estimates are available; otherwise it falls back to a flat scenario growth path.
 - The DCF terminal value formula is standard when `WACC > terminal_growth`; if that safety condition is violated, the code uses a rough fallback cap.

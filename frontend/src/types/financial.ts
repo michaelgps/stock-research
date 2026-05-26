@@ -129,12 +129,44 @@ export interface ForwardYearEstimate {
   implied_price: number;
 }
 
+export interface FiscalYearPEScenario {
+  label: string;
+  percentile: string;
+  pe_multiple: number | null;
+  forward_pe_value: number | null;
+  upside_pct: number | null;
+  verdict: string | null;
+}
+
+export interface FiscalYearValuationWindow {
+  fiscal_year: number;
+  fiscal_year_end: string | null;
+  valuation_date: string;
+  years_from_valuation_date: number | null;
+  time_distance_label: string;
+  forward_eps: number;
+  pe_multiple: number | null;
+  forward_pe_value: number | null;
+  forward_pe_upside_pct: number | null;
+  forward_pe_verdict: string | null;
+  pe_scenarios: FiscalYearPEScenario[];
+  dcf_present_value: number | null;
+  dcf_rolled_forward_value: number | null;
+  dcf_rolled_forward_upside_pct: number | null;
+  dcf_rolled_forward_verdict: string | null;
+  discount_rate_used: number | null;
+  discount_rate_source: string;
+}
+
 export interface YearlyPERange {
   fy: number;
   eps: number;
   pe_low: number;
   pe_high: number;
   pe_avg: number;
+  pe_p25?: number | null;
+  pe_p50?: number | null;
+  pe_p75?: number | null;
   price_high: number;
   price_low: number;
 }
@@ -148,6 +180,7 @@ export interface ValuationResponse {
   dcf_view: ValuationView;
   pe_view: ValuationView;
   forward_eps_metadata: ForwardEpsMetadata | null;
+  fiscal_year_valuation_windows: FiscalYearValuationWindow[];
   forward_trend: ForwardYearEstimate[];
   historical_pe_ranges: YearlyPERange[];
   peer_comparison: PeerComparison | null;

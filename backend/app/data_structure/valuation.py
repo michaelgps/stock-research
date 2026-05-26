@@ -73,6 +73,37 @@ class ForwardYearEstimate(BaseModel):
     implied_price: float  # eps × base P/E multiple
 
 
+class FiscalYearPEScenario(BaseModel):
+    """One P/E percentile scenario inside a fiscal-year valuation window."""
+    label: str
+    percentile: str
+    pe_multiple: float | None = None
+    forward_pe_value: float | None = None
+    upside_pct: float | None = None
+    verdict: str | None = None
+
+
+class FiscalYearValuationWindow(BaseModel):
+    """DCF and Forward P/E values aligned to one fiscal-year end date."""
+    fiscal_year: int
+    fiscal_year_end: str | None = None
+    valuation_date: str
+    years_from_valuation_date: float | None = None
+    time_distance_label: str
+    forward_eps: float
+    pe_multiple: float | None = None
+    forward_pe_value: float | None = None
+    forward_pe_upside_pct: float | None = None
+    forward_pe_verdict: str | None = None
+    pe_scenarios: list[FiscalYearPEScenario] = Field(default_factory=list)
+    dcf_present_value: float | None = None
+    dcf_rolled_forward_value: float | None = None
+    dcf_rolled_forward_upside_pct: float | None = None
+    dcf_rolled_forward_verdict: str | None = None
+    discount_rate_used: float | None = None
+    discount_rate_source: str = "base_dcf_wacc"
+
+
 class PeerPEData(BaseModel):
     """Peer company forward P/E data."""
     ticker: str
@@ -121,6 +152,7 @@ class ValuationResponse(BaseModel):
     dcf_view: ValuationView
     pe_view: ValuationView
     forward_eps_metadata: ForwardEpsMetadata | None = None
+    fiscal_year_valuation_windows: list[FiscalYearValuationWindow] = Field(default_factory=list)
     forward_trend: list[ForwardYearEstimate]  # 5-year forward P/E trend
     historical_pe_ranges: list[dict]  # yearly high/low/avg P/E for context
     peer_comparison: PeerComparison | None = None  # peer forward P/E context

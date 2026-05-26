@@ -5,6 +5,7 @@ Includes 5-year forward trend, historical P/E context, and peer comparison.
 """
 
 import logging
+from datetime import date as dt_date
 
 from app.data_structure.financial import FinancialDataResponse, AnalystEstimateData
 from app.data_structure.signals import ExtractionResult
@@ -18,6 +19,8 @@ from app.data_structure.valuation import (
     MarginOfSafety,
     ValuationView,
     ForwardEpsMetadata,
+    FiscalYearValuationWindow,
+    FiscalYearPEScenario,
 )
 from app.logic.valuation.assumptions import build_scenarios, get_forward_eps
 from app.logic.valuation.dcf import run_dcf
@@ -101,7 +104,8 @@ async def run_valuation(
     # Denominator mismatch note
     data_quality["pe_denominator_note"] = (
         "Historical P/E uses trailing EPS; applied to forward EPS. "
-        "Peer P/E uses forward EPS. DCF-implied P/E is only a cross-check, not a P/E input."
+        "P/E scenarios use the ticker's historical P25/P50/P75 multiples. "
+        "DCF-implied P/E and manual peers are cross-checks only, not P/E inputs."
     )
 
     # --- Cross-validate FMP EPS with Yahoo Finance ---
@@ -225,7 +229,6 @@ async def run_valuation(
         mult_result = run_multiples(
             data, label, forward_eps,
             yearly_pe_ranges=yearly_pe_ranges,
-            forward_eps_growth=fwd_eps_growth,
             peer_pe_data=peer_pe_data,
         )
 
@@ -285,7 +288,7 @@ async def run_valuation(
         bull_value=scenarios["bull"].multiples.forward_pe_value,
         notes=[
             "Standalone market multiple view: next fiscal year EPS multiplied by selected P/E multiple.",
-            "P/E multiple uses historical P/E and manual peers when available; DCF is not an input.",
+            "P/E scenarios use the ticker's historical P25/P50/P75 multiples; DCF and peers are not inputs.",
         ],
     )
 
@@ -313,6 +316,20 @@ async def run_valuation(
         projection_years=base_a.projection_years,
     )
 
+    forward_eps_metadata = _build_forward_eps_metadata(
+        forward_eps_estimate,
+        latest_fiscal_year_end=fy_end_date,
+    )
+    fiscal_year_valuation_windows = _build_fiscal_year_valuation_windows(
+        forward_trend=forward_trend,
+        latest_fiscal_year_end=fy_end_date,
+        dcf_present_value=dcf_view.base_value,
+        discount_rate=base_a.discount_rate,
+        pe_multiple=base_pe_mult,
+        current_price=current_price,
+        scenario_results=scenarios,
+    )
+
     return ValuationResponse(
         ticker=data.company.ticker,
         current_price=round(current_price, 2),
@@ -321,12 +338,10 @@ async def run_valuation(
         bull=scenarios["bull"],
         dcf_view=dcf_view,
         pe_view=pe_view,
-        forward_eps_metadata=_build_forward_eps_metadata(
-            forward_eps_estimate,
-            latest_fiscal_year_end=fy_end_date,
-        ),
+        forward_eps_metadata=forward_eps_metadata,
+        fiscal_year_valuation_windows=fiscal_year_valuation_windows,
         forward_trend=forward_trend,
-        historical_pe_ranges=yearly_pe_ranges,
+        historical_pe_ranges=_public_historical_pe_ranges(yearly_pe_ranges),
         peer_comparison=peer_comparison,
         signal_adjustments=signal_adj,
         data_quality=data_quality,
@@ -370,6 +385,148 @@ def _build_forward_eps_metadata(
         source="fmp_annual_analyst_estimates",
         as_of_date=data_pull_log_repository.today_str(),
     )
+
+
+def _public_historical_pe_ranges(yearly_pe_ranges: list[dict]) -> list[dict]:
+    """Remove internal daily P/E observations before serializing API output."""
+    return [
+        {key: value for key, value in row.items() if key != "pe_daily_values"}
+        for row in yearly_pe_ranges
+    ]
+
+
+def _build_fiscal_year_valuation_windows(
+    forward_trend: list[ForwardYearEstimate],
+    latest_fiscal_year_end: str | None,
+    dcf_present_value: float | None,
+    discount_rate: float | None,
+    pe_multiple: float | None,
+    current_price: float,
+    scenario_results: dict,
+) -> list[FiscalYearValuationWindow]:
+    """Align Forward P/E targets and rolled-forward DCF values by fiscal-year end."""
+    from app.repositories import data_pull_log_repository
+
+    valuation_date = data_pull_log_repository.today_str()
+    windows: list[FiscalYearValuationWindow] = []
+    for estimate in forward_trend:
+        if not estimate.year or not str(estimate.year).isdigit():
+            continue
+        fiscal_year = int(estimate.year)
+        fiscal_year_end = (
+            _infer_fiscal_year_end(latest_fiscal_year_end, fiscal_year)
+            if latest_fiscal_year_end
+            else None
+        )
+        years_from_valuation_date = _years_between(valuation_date, fiscal_year_end)
+        dcf_rolled_forward_value = None
+        if (
+            dcf_present_value is not None
+            and discount_rate is not None
+            and years_from_valuation_date is not None
+        ):
+            roll_years = max(years_from_valuation_date, 0)
+            dcf_rolled_forward_value = round(dcf_present_value * (1 + discount_rate) ** roll_years, 2)
+        forward_pe_upside = _compute_upside(estimate.implied_price, current_price)
+        dcf_rolled_forward_upside = _compute_upside(dcf_rolled_forward_value, current_price)
+        pe_scenarios = _build_fiscal_year_pe_scenarios(
+            eps=estimate.eps,
+            current_price=current_price,
+            scenario_results=scenario_results,
+        )
+
+        windows.append(FiscalYearValuationWindow(
+            fiscal_year=fiscal_year,
+            fiscal_year_end=fiscal_year_end,
+            valuation_date=valuation_date,
+            years_from_valuation_date=(
+                round(years_from_valuation_date, 4)
+                if years_from_valuation_date is not None
+                else None
+            ),
+            time_distance_label=_format_time_distance(valuation_date, fiscal_year_end),
+            forward_eps=round(estimate.eps, 2),
+            pe_multiple=round(pe_multiple, 1) if pe_multiple is not None else None,
+            forward_pe_value=round(estimate.implied_price, 2),
+            forward_pe_upside_pct=forward_pe_upside,
+            forward_pe_verdict=_classify_verdict(forward_pe_upside) if forward_pe_upside is not None else None,
+            pe_scenarios=pe_scenarios,
+            dcf_present_value=round(dcf_present_value, 2) if dcf_present_value is not None else None,
+            dcf_rolled_forward_value=dcf_rolled_forward_value,
+            dcf_rolled_forward_upside_pct=dcf_rolled_forward_upside,
+            dcf_rolled_forward_verdict=(
+                _classify_verdict(dcf_rolled_forward_upside)
+                if dcf_rolled_forward_upside is not None
+                else None
+            ),
+            discount_rate_used=round(discount_rate, 4) if discount_rate is not None else None,
+            discount_rate_source="base_dcf_wacc",
+        ))
+    return windows
+
+
+def _build_fiscal_year_pe_scenarios(
+    eps: float,
+    current_price: float,
+    scenario_results: dict,
+) -> list[FiscalYearPEScenario]:
+    scenario_percentiles = {
+        "bear": "P25",
+        "base": "P50 / median",
+        "bull": "P75",
+    }
+    rows: list[FiscalYearPEScenario] = []
+    for label in ("bear", "base", "bull"):
+        scenario = scenario_results.get(label)
+        pe_multiple = scenario.multiples.pe_multiple if scenario else None
+        value = round(eps * pe_multiple, 2) if pe_multiple is not None else None
+        upside_pct = _compute_upside(value, current_price)
+        rows.append(FiscalYearPEScenario(
+            label=label,
+            percentile=scenario_percentiles[label],
+            pe_multiple=round(pe_multiple, 1) if pe_multiple is not None else None,
+            forward_pe_value=value,
+            upside_pct=upside_pct,
+            verdict=_classify_verdict(upside_pct) if upside_pct is not None else None,
+        ))
+    return rows
+
+
+def _compute_upside(value: float | None, current_price: float) -> float | None:
+    if value is None or current_price <= 0:
+        return None
+    return round((value - current_price) / current_price, 4)
+
+
+def _years_between(start_date: str, end_date: str | None) -> float | None:
+    if not end_date:
+        return None
+    try:
+        start = dt_date.fromisoformat(start_date)
+        end = dt_date.fromisoformat(end_date)
+    except ValueError:
+        return None
+    return (end - start).days / 365.25
+
+
+def _format_time_distance(start_date: str, end_date: str | None) -> str:
+    years = _years_between(start_date, end_date)
+    if years is None:
+        return "date unknown"
+    days = round(years * 365.25)
+    if days == 0:
+        return "today"
+
+    abs_days = abs(days)
+    whole_years = abs_days // 365
+    months = round((abs_days % 365) / 30)
+    parts = []
+    if whole_years:
+        parts.append(f"{whole_years}y")
+    if months or not parts:
+        parts.append(f"{months}m")
+    distance = " ".join(parts)
+    return f"in {distance}" if days > 0 else f"{distance} ago"
 
 
 def _infer_fiscal_year_end(latest_fiscal_year_end: str, fiscal_year: int) -> str | None:
