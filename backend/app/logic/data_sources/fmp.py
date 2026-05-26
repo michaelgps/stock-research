@@ -38,6 +38,12 @@ async def _get(endpoint: str, params: dict | None = None) -> dict | list | None:
     async with httpx.AsyncClient() as client:
         resp = await client.get(url, params=query)
         if resp.status_code != 200:
+            logger.warning(
+                "FMP endpoint %s failed with status %s: %s",
+                endpoint,
+                resp.status_code,
+                resp.text[:300],
+            )
             return None
         return resp.json()
 
@@ -403,15 +409,17 @@ async def get_peer_forward_pe(
 
 
 async def get_earnings_surprises(ticker: str) -> list[EarningsSurpriseData]:
-    """Fetch historical earnings surprises (actual vs estimated EPS)."""
-    data = await _get("earnings-surprises", {"symbol": ticker.upper()})
+    """Fetch historical adjusted EPS actuals from FMP's earnings calendar."""
+    data = await _get("earnings", {"symbol": ticker.upper()})
     if not data or not isinstance(data, list):
         return []
 
     surprises = []
-    for entry in data[:12]:  # Last 12 quarters
-        actual = entry.get("actualEarningResult")
-        estimated = entry.get("estimatedEarning")
+    for entry in data[:32]:  # Up to ~8 years of quarterly observations
+        actual = entry.get("epsActual")
+        estimated = entry.get("epsEstimated")
+        if actual is None:
+            continue
         surprise = None
         surprise_pct = None
         if actual is not None and estimated is not None:

@@ -18,6 +18,7 @@ from datetime import date as dt_date
 
 from app.data_structure.financial import (
     AnalystEstimateData,
+    EarningsSurpriseData,
     FinancialDataResponse,
     FinancialStatementData,
 )
@@ -38,6 +39,117 @@ def _percentile(values: list[float], percentile: float) -> float:
     return clean[lower] * (1 - weight) + clean[upper] * weight
 
 
+def _nearest_split_factor(share_ratio: float) -> float | None:
+    """Detect common stock split factors from large diluted-share jumps."""
+    if share_ratio <= 0:
+        return None
+
+    common_factors = [
+        1 / 20, 1 / 10, 1 / 8, 1 / 7, 1 / 6, 1 / 5, 1 / 4, 1 / 3, 1 / 2, 2 / 3,
+        1.5, 2, 3, 4, 5, 6, 7, 8, 10, 20,
+    ]
+    nearest = min(common_factors, key=lambda factor: abs(share_ratio - factor) / share_ratio)
+    relative_error = abs(share_ratio - nearest) / share_ratio
+
+    # Keep the heuristic conservative: small split ratios are easier to confuse
+    # with stock issuance or buybacks than large 10-for-1 style changes.
+    tolerance = 0.03 if 0.5 <= nearest <= 2 else 0.08
+    if relative_error <= tolerance:
+        return nearest
+    return None
+
+
+def _share_adjustment_factors(annual_statements: list[FinancialStatementData]) -> dict[int, float]:
+    """
+    Return per-fiscal-year share multipliers to align EPS with split-adjusted prices.
+
+    Yahoo prices are adjusted to the current share basis. SEC diluted shares are
+    often stored from each original filing, so pre-split fiscal years need their
+    share count multiplied by later split factors before EPS is compared to
+    split-adjusted prices.
+    """
+    annual = [
+        statement for statement in annual_statements
+        if statement.diluted_shares and statement.diluted_shares > 0
+    ]
+    annual.sort(key=lambda statement: statement.fiscal_year)
+    factors = {statement.fiscal_year: 1.0 for statement in annual}
+
+    for index in range(1, len(annual)):
+        previous = annual[index - 1]
+        current = annual[index]
+        ratio = current.diluted_shares / previous.diluted_shares
+        split_factor = _nearest_split_factor(ratio)
+        if split_factor is None:
+            continue
+        for fiscal_year in factors:
+            if fiscal_year <= previous.fiscal_year:
+                factors[fiscal_year] *= split_factor
+
+    return factors
+
+
+def _build_adjusted_ttm_eps_points(
+    earnings_surprises: list[EarningsSurpriseData] | None,
+) -> list[tuple[dt_date, float]]:
+    """
+    Build market/adjusted TTM EPS points from quarterly earnings actuals.
+
+    FMP stable/earnings uses earnings announcement dates, so each point becomes
+    available on its report date. Finnhub stock/earnings stores fiscal period
+    end dates in our model, so it is intentionally not used here to avoid
+    look-ahead bias.
+    """
+    if not earnings_surprises:
+        return []
+
+    by_source: dict[str, list[EarningsSurpriseData]] = {}
+    for item in earnings_surprises:
+        if item.actual_eps is None:
+            continue
+        if not item.date:
+            continue
+        by_source.setdefault(item.source or "unknown", []).append(item)
+
+    if len(by_source.get("fmp", [])) < 4:
+        return []
+
+    quarters = []
+    for item in by_source["fmp"]:
+        try:
+            report_date = dt_date.fromisoformat(item.date)
+        except ValueError:
+            continue
+        quarters.append((report_date, item.actual_eps))
+    quarters.sort(key=lambda row: row[0])
+    quarters = quarters[-32:]
+
+    ttm_points = []
+    for index in range(3, len(quarters)):
+        report_date = quarters[index][0]
+        window = quarters[index - 3:index + 1]
+        span_days = (window[-1][0] - window[0][0]).days
+        if not 240 <= span_days <= 460:
+            continue
+        ttm_eps = sum(eps for _, eps in window)
+        if ttm_eps > 0:
+            ttm_points.append((report_date, ttm_eps))
+    return ttm_points
+
+
+def _adjusted_ttm_eps_for_date(
+    price_date: dt_date,
+    ttm_points: list[tuple[dt_date, float]],
+) -> float | None:
+    eps = None
+    for report_date, ttm_eps in ttm_points:
+        if report_date <= price_date:
+            eps = ttm_eps
+        else:
+            break
+    return eps
+
+
 # ---------------------------------------------------------------------------
 # Step 1: Compute yearly P/E distribution from daily prices + annual EPS
 # ---------------------------------------------------------------------------
@@ -45,22 +157,33 @@ def _percentile(values: list[float], percentile: float) -> float:
 def compute_yearly_pe_ranges(
     daily_prices: list[dict],
     statements: list[FinancialStatementData],
+    earnings_surprises: list[EarningsSurpriseData] | None = None,
 ) -> list[dict]:
     """
-    For each fiscal year with EPS data, compute daily trailing P/E values.
+    For each fiscal year, compute daily trailing P/E values.
 
     Each row includes a private pe_daily_values list so aggregate 5-year
     P25/P50/P75 can be computed internally. The API response strips that list.
+    Adjusted/non-GAAP TTM EPS is preferred when available; annual GAAP EPS is
+    the fallback.
     """
     annual = [s for s in statements if s.period == "annual"]
     annual.sort(key=lambda s: s.fiscal_year, reverse=True)
+    share_adjustment_factors = _share_adjustment_factors(annual)
+    adjusted_ttm_points = _build_adjusted_ttm_eps_points(earnings_surprises)
 
     fy_eps = {}
     for statement in annual[:5]:
         if statement.net_income and statement.diluted_shares and statement.diluted_shares > 0:
-            eps = statement.net_income / statement.diluted_shares
+            share_factor = share_adjustment_factors.get(statement.fiscal_year, 1.0)
+            adjusted_shares = statement.diluted_shares * share_factor
+            eps = statement.net_income / adjusted_shares
             if eps > 0:
-                fy_eps[statement.fiscal_year] = {"eps": eps, "end_date": statement.date}
+                fy_eps[statement.fiscal_year] = {
+                    "eps": eps,
+                    "end_date": statement.date,
+                    "share_adjustment_factor": share_factor,
+                }
 
     if not fy_eps or not daily_prices:
         return []
@@ -73,7 +196,7 @@ def compute_yearly_pe_ranges(
 
     results = []
     for fy, info in sorted(fy_eps.items(), reverse=True):
-        eps = info["eps"]
+        annual_eps = info["eps"]
         end_str = info["end_date"]
         try:
             fy_end = dt_date.fromisoformat(end_str)
@@ -93,23 +216,59 @@ def compute_yearly_pe_ranges(
         if not year_prices:
             continue
 
-        highs = [p["high"] for p in year_prices if "high" in p]
-        lows = [p["low"] for p in year_prices if "low" in p]
-        closes = [p["close"] for p in year_prices if "close" in p]
+        price_eps_rows = []
+        adjusted_count = 0
+        has_adjusted_coverage = any(
+            fy_start <= report_date <= fy_end for report_date, _ in adjusted_ttm_points
+        )
+        for price in year_prices:
+            close = price.get("close")
+            if close is None or close <= 0:
+                continue
+            try:
+                price_date = dt_date.fromisoformat(price.get("date", ""))
+            except ValueError:
+                continue
+            adjusted_eps = _adjusted_ttm_eps_for_date(price_date, adjusted_ttm_points)
+            if adjusted_eps is None and has_adjusted_coverage:
+                continue
+            eps = adjusted_eps if adjusted_eps is not None else annual_eps
+            if eps <= 0:
+                continue
+            if adjusted_eps is not None:
+                adjusted_count += 1
+            price_eps_rows.append((price, eps, close / eps))
 
-        if not highs or not lows or not closes:
+        if not price_eps_rows:
             continue
 
-        pe_daily_values = [close / eps for close in closes if close > 0]
+        highs = [price["high"] for price, _, _ in price_eps_rows if "high" in price]
+        lows = [price["low"] for price, _, _ in price_eps_rows if "low" in price]
+        closes = [price["close"] for price, _, _ in price_eps_rows if "close" in price]
+        eps_values = [eps for _, eps, _ in price_eps_rows]
+        pe_daily_values = [pe for _, _, pe in price_eps_rows]
+
+        if not highs or not lows or not closes or not eps_values:
+            continue
+
         if not pe_daily_values:
             continue
+        if adjusted_count == len(price_eps_rows):
+            eps_basis = "adjusted_ttm_eps"
+        elif adjusted_count:
+            eps_basis = "mixed_adjusted_ttm_and_gaap"
+        else:
+            eps_basis = "gaap_annual_eps"
 
         results.append({
             "fy": fy,
-            "eps": round(eps, 2),
-            "pe_low": round(min(lows) / eps, 1),
-            "pe_high": round(max(highs) / eps, 1),
-            "pe_avg": round((sum(closes) / len(closes)) / eps, 1),
+            "eps": round(_percentile(eps_values, 0.50), 2),
+            "eps_basis": eps_basis,
+            "adjusted_eps_observations": adjusted_count,
+            "share_adjustment_factor": round(info.get("share_adjustment_factor", 1.0), 4),
+            "pe_low": round(min(pe_daily_values), 1),
+            "pe_high": round(max(pe_daily_values), 1),
+            "pe_avg": round(sum(pe_daily_values) / len(pe_daily_values), 1),
             "pe_p25": round(_percentile(pe_daily_values, 0.25), 1),
             "pe_p50": round(_percentile(pe_daily_values, 0.50), 1),
             "pe_p75": round(_percentile(pe_daily_values, 0.75), 1),

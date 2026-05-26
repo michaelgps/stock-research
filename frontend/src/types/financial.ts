@@ -161,6 +161,9 @@ export interface FiscalYearValuationWindow {
 export interface YearlyPERange {
   fy: number;
   eps: number;
+  eps_basis?: string | null;
+  adjusted_eps_observations?: number | null;
+  share_adjustment_factor?: number | null;
   pe_low: number;
   pe_high: number;
   pe_avg: number;

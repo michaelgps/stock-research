@@ -71,9 +71,14 @@ async def run_valuation(
 
     # --- Compute yearly P/E ranges from daily prices + EPS ---
     daily_prices = await fetch_daily_prices(data.company.ticker, db=db)
-    yearly_pe_ranges = compute_yearly_pe_ranges(daily_prices, data.annual_statements)
+    yearly_pe_ranges = compute_yearly_pe_ranges(
+        daily_prices,
+        data.annual_statements,
+        data.earnings_surprises,
+    )
     if yearly_pe_ranges:
         data_quality["pe_range_years"] = len(yearly_pe_ranges)
+        data_quality["historical_pe_eps_basis"] = _summarize_pe_eps_basis(yearly_pe_ranges)
     else:
         data_quality["pe_range_years"] = "not_available"
 
@@ -393,6 +398,17 @@ def _public_historical_pe_ranges(yearly_pe_ranges: list[dict]) -> list[dict]:
         {key: value for key, value in row.items() if key != "pe_daily_values"}
         for row in yearly_pe_ranges
     ]
+
+
+def _summarize_pe_eps_basis(yearly_pe_ranges: list[dict]) -> str:
+    bases = {row.get("eps_basis") for row in yearly_pe_ranges if row.get("eps_basis")}
+    if bases == {"adjusted_ttm_eps"}:
+        return "adjusted_ttm_eps"
+    if "adjusted_ttm_eps" in bases or "mixed_adjusted_ttm_and_gaap" in bases:
+        return "mixed_adjusted_ttm_and_gaap"
+    if bases:
+        return "gaap_annual_eps"
+    return "unknown"
 
 
 def _build_fiscal_year_valuation_windows(

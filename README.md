@@ -9,7 +9,7 @@ Enter a ticker symbol and the app:
 1. Fetches company, financial, estimate, filing, and market price data from SEC EDGAR, FMP, Finnhub, Yahoo Finance, and optional FRED.
 2. Stores all historical data in PostgreSQL `tb_` tables instead of overwriting old periods.
 3. Runs a base DCF model using annual financial reports, analyst revenue estimates, FCF margins, and CAPM-style WACC.
-4. Runs a forward P/E model using next fiscal year EPS and the ticker's own historical P/E percentiles: P25, P50, and P75.
+4. Runs a forward P/E model using next fiscal year EPS and the ticker's own historical P/E percentiles: P25, P50, and P75. Historical P/E prefers FMP earnings-calendar EPS actuals as a market/adjusted EPS proxy, with split-adjusted GAAP EPS as fallback.
 5. Shows each fiscal-year valuation window with both a forward P/E target and a DCF value rolled forward to that same fiscal year end.
 6. Saves each valuation result by ticker, valuation date, and model version.
 
@@ -46,7 +46,7 @@ The current schema is built around historical persistence. Data is not overwritt
 | `tb_company` | Stable company identity such as ticker, name, CIK, exchange, currency, and country |
 | `tb_company_profile` | Daily company profile records from FMP/Finnhub/manual sources, including sector, industry, market cap, price, shares, and peer metadata |
 | `tb_financial_report` | Annual/quarterly financial statements by ticker, source, period type, fiscal year, and quarter |
-| `tb_estimate` | Analyst estimates, earnings surprises, and EPS validation records for company tickers |
+| `tb_estimate` | Analyst estimates, quarterly earnings actual EPS, earnings surprises, and EPS validation records for company tickers |
 | `tb_market_price` | Daily OHLCV market prices, primarily from Yahoo Finance via `yfinance` |
 | `tb_filing` | SEC filing text sections and user-submitted text materials |
 | `tb_valuation` | Saved valuation results by ticker, valuation date, and model version |
@@ -227,6 +227,18 @@ The rolled-forward DCF value is shown next to the forward P/E target for the sam
 
 The P/E model uses the ticker's own last ~5 fiscal years of daily trailing P/E observations.
 
+For historical trailing P/E, the model prefers FMP earnings-calendar EPS actuals as a market/adjusted EPS proxy:
+
+```text
+Daily Historical P/E = Daily Price / Latest Reported 4-Quarter Market EPS
+```
+
+If FMP market EPS is unavailable, the model falls back to split-adjusted GAAP annual EPS from financial statements. The response exposes the EPS basis for each historical P/E year.
+
+Market TTM EPS keeps negative reported quarters in the four-quarter sum, then only uses the resulting TTM value when the total is positive. If a fiscal year has market EPS coverage, the model excludes earlier non-covered trading days instead of mixing market and GAAP denominators in the same yearly P/E distribution.
+
+FMP `epsActual` is not treated as audited GAAP. It is used as a market EPS proxy because it generally follows the earnings-calendar / consensus-surprise denominator investors use for P/E. Finnhub earnings actuals are not used for historical P/E because the current stored date is the fiscal period end date, not the earnings announcement date, which would introduce look-ahead bias.
+
 The model sorts all valid daily P/E observations and uses percentiles:
 
 | Scenario | Historical P/E multiple |
@@ -236,6 +248,10 @@ The model sorts all valid daily P/E observations and uses percentiles:
 | Bull | P75, the 75th percentile |
 
 Daily P/E observations are internal calculation inputs only. The API returns yearly summary fields such as `pe_low`, `pe_high`, `pe_avg`, `pe_p25`, `pe_p50`, and `pe_p75`, but not the full daily observation list.
+
+Because Yahoo prices are split-adjusted, fallback GAAP EPS is also adjusted to the current split-adjusted share basis before calculating historical P/E. This prevents stock splits, such as NVDA's 2024 10-for-1 split, from artificially compressing historical P/E multiples.
+
+Split adjustment is inferred conservatively from large diluted-share jumps using common split ratios. This handles major stock splits without calling another paid endpoint, but a dedicated corporate-actions feed would still be preferable for production-grade coverage.
 
 Forward EPS uses the next fiscal year annual EPS estimate from FMP analyst estimates. It is not NTM EPS. The response exposes the EPS basis, fiscal year label, inferred fiscal year end date when available, source, and as-of date.
 
@@ -263,7 +279,8 @@ DCF and forward P/E are not averaged into a blended target. The primary valuatio
 | `pe_scenarios` | Bear/base/bull P/E outputs inside each fiscal-year window, mapped to P25/P50/P75 |
 | `dcf_view` | Legacy/base DCF present-value reference |
 | `pe_view` | Legacy next-fiscal-year P/E view |
-| `forward_eps_metadata` | Explicit EPS basis, fiscal year period, fiscal year end, source, and as-of date |
+| `forward_eps_metadata` | Explicit forward EPS basis, fiscal year period, fiscal year end, source, and as-of date |
+| `historical_pe_ranges` | Yearly historical P/E summaries, including `eps`, `eps_basis`, `pe_p25`, `pe_p50`, and `pe_p75` |
 
 Legacy scenario fields still include `bear`, `base`, and `bull` with detailed `dcf` and `multiples` objects, but `blended_per_share` is deprecated and no longer used as the main valuation target.
 

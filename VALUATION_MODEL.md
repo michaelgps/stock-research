@@ -82,6 +82,18 @@ DCF per share = Equity Value / diluted shares
 
 The forward P/E model uses the ticker's own last ~5 fiscal years of daily trailing P/E observations.
 
+Historical trailing P/E prefers FMP earnings-calendar EPS actuals as a market/adjusted EPS proxy:
+
+```text
+Daily Historical P/E = Daily Price / Latest Reported 4-Quarter Market EPS
+```
+
+If FMP market EPS is unavailable, the model falls back to split-adjusted GAAP annual EPS from financial statements. Each yearly P/E range includes an `eps_basis` field so the user can see which denominator was used.
+
+Negative quarterly EPS values are retained when building four-quarter market TTM EPS. The model only drops a TTM point when the four-quarter total is non-positive or the four-quarter report-date span fails a basic timing sanity check. If a fiscal year has market EPS coverage, pre-coverage trading days are excluded instead of being mixed with GAAP annual EPS.
+
+FMP `epsActual` is a market EPS proxy, not audited GAAP and not a guaranteed non-GAAP definition. Finnhub earnings actuals are not used for historical P/E because the current stored date is the fiscal period end date rather than the earnings announcement date.
+
 The observations are sorted and mapped to scenario percentiles:
 
 | Scenario | Multiple |
@@ -91,6 +103,10 @@ The observations are sorted and mapped to scenario percentiles:
 | Bull | P75 |
 
 The raw daily P/E values are kept internal to the valuation calculation. API consumers receive yearly summary ranges and percentiles, not the full daily observation list.
+
+Yahoo prices are split-adjusted, so fallback GAAP EPS is adjusted to the same current split-adjusted share basis before calculating historical P/E. Otherwise, pre-split EPS can be overstated relative to split-adjusted prices and P/E can be understated by the split ratio.
+
+The split adjustment is a conservative heuristic based on common split ratios detected from diluted-share jumps. It is intended to fix obvious share-basis mismatches while avoiding broad 2x/0.5x false positives from issuance or buybacks. A direct corporate-actions feed would be a stronger long-term implementation.
 
 ```text
 Forward P/E value = next fiscal year EPS * selected P/E multiple
