@@ -1,10 +1,9 @@
 """
 Forward P/E valuation with triangulation.
 
-P/E is determined by triangulating three sources:
+P/E is determined by triangulating standalone market multiple sources:
   (a) Historical trailing P/E distribution (yearly high/low/avg from daily prices)
   (b) Peer forward P/E (median + cap-weighted from FMP peers)
-  (c) Justified P/E cross-check (DCF per-share / forward EPS)
 
 Note on denominator mismatch: historical P/E uses trailing EPS (net income /
 diluted shares from filings), but we apply it to forward EPS. This is a known
@@ -119,14 +118,12 @@ def determine_pe_multiple(
     yearly_pe_ranges: list[dict],
     forward_eps_growth: float | None,
     peer_pe_data: dict | None,
-    justified_pe: float | None,
     scenario: str,
 ) -> tuple[float, dict]:
     """
     Determine forward P/E multiple by triangulating:
       (a) Historical trailing P/E distribution (yearly ranges)
       (b) Peer forward P/E (median from FMP peers)
-      (c) Justified P/E (DCF per share / forward EPS)
 
     Bear = weighted low estimate
     Base = weighted central estimate
@@ -201,19 +198,6 @@ def determine_pe_multiple(
             "bull": peer_base + peer_spread,
         }
         estimates.append((peer_scenario[scenario], 0.3, "peer"))
-
-    # --- (c) Justified P/E (DCF / forward EPS) ---
-    if justified_pe is not None and justified_pe > 0:
-        details["justified_pe"] = round(justified_pe, 1)
-        # Justified P/E is a single-point fundamental anchor
-        # Use ±10% for bear/bull
-        just_spread = justified_pe * 0.10
-        just_scenario = {
-            "bear": justified_pe - just_spread,
-            "base": justified_pe,
-            "bull": justified_pe + just_spread,
-        }
-        estimates.append((just_scenario[scenario], 0.2, "justified"))
 
     # --- Combine via weighted average ---
     if estimates:
@@ -420,17 +404,15 @@ def run_multiples(
     yearly_pe_ranges: list[dict] | None = None,
     forward_eps_growth: float | None = None,
     peer_pe_data: dict | None = None,
-    justified_pe: float | None = None,
 ) -> MultiplesResult:
     """
-    Compute per-share value using forward P/E via triangulation.
-    P/E is determined from: historical ranges, peer comparison, justified P/E.
+    Compute per-share value using forward P/E via standalone multiple inputs.
+    DCF-derived justified P/E is reported only as a cross-check, not as an input.
     """
     pe_mult, details = determine_pe_multiple(
         yearly_pe_ranges or [],
         forward_eps_growth,
         peer_pe_data,
-        justified_pe,
         scenario,
     )
 
@@ -442,5 +424,6 @@ def run_multiples(
         forward_pe_value=forward_pe_value,
         forward_eps=round(forward_eps, 2) if forward_eps else None,
         pe_multiple=pe_mult,
-        justified_pe=round(justified_pe, 1) if justified_pe else None,
+        justified_pe=None,
+        details=details,
     )

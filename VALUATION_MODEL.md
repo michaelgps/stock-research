@@ -8,7 +8,7 @@ This document describes the current end-to-end valuation flow used by the app.
 |---|---|
 | Data collection | Pull company, financial, estimate, filing, and price data into PostgreSQL |
 | Optional signal extraction | Use LLM extraction on filings/transcripts when text is available |
-| Valuation | Run DCF + forward P/E, blend outputs, and save the valuation result |
+| Valuation | Run DCF and forward P/E as separate views, then save the valuation result |
 
 ## Data Persistence
 
@@ -80,35 +80,31 @@ DCF per share = Equity Value / diluted shares
 
 ## Forward P/E Model
 
-The forward P/E model combines available components:
+The forward P/E model combines standalone market multiple components:
 
 | Component | Default Weight | Notes |
 |---|---:|---|
 | Historical P/E | 50% | Uses historical prices and annual EPS |
 | Manual peer P/E | 30% | Only used when manual peers exist |
-| DCF-justified P/E | 20% | DCF base value divided by forward EPS |
 
 If one component is unavailable, weights are normalized across the available components.
 
 ```text
-Forward P/E value = forward EPS * blended P/E multiple
+Forward P/E value = next fiscal year EPS * selected P/E multiple
 ```
 
-## Blended Output
+The EPS denominator is explicitly labeled as next fiscal year EPS, not NTM EPS. The API returns the fiscal year label, inferred fiscal year end date when available, source, and as-of date.
 
-The final bear/base/bull values blend DCF and forward P/E:
+DCF-implied P/E may be displayed as a cross-check, but it is not an input into the P/E multiple.
 
-```text
-Blended price = 50% * DCF value + 50% * forward P/E value
-```
+## Separate Output
 
-Fallback rules:
+The final output does not average DCF and forward P/E. It shows two standalone views:
 
-| Situation | Behavior |
+| View | Description |
 |---|---|
-| P/E unavailable | Use DCF only |
-| DCF unavailable | Use P/E only |
-| Both unavailable | Return zero value |
+| `dcf_view` | Bear/base/bull intrinsic value range from DCF |
+| `pe_view` | Bear/base/bull market multiple value range from forward P/E |
 
 ## Saved Valuation
 

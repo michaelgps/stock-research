@@ -1,12 +1,12 @@
 """
 Valuation engine orchestrator.
-Runs DCF + forward P/E (with triangulation) for bear/base/bull, blends results.
+Runs DCF and forward P/E as separate bear/base/bull valuation views.
 Includes 5-year forward trend, historical P/E context, and peer comparison.
 """
 
 import logging
 
-from app.data_structure.financial import FinancialDataResponse
+from app.data_structure.financial import FinancialDataResponse, AnalystEstimateData
 from app.data_structure.signals import ExtractionResult
 from app.data_structure.valuation import (
     ValuationResponse,
@@ -16,6 +16,8 @@ from app.data_structure.valuation import (
     PeerPEData,
     ReverseDCF,
     MarginOfSafety,
+    ValuationView,
+    ForwardEpsMetadata,
 )
 from app.logic.valuation.assumptions import build_scenarios, get_forward_eps
 from app.logic.valuation.dcf import run_dcf
@@ -31,9 +33,8 @@ from app.logic.valuation.multiples import (
 
 logger = logging.getLogger(__name__)
 
-# DCF vs forward P/E blend weights
-DCF_WEIGHT = 0.50
-MULTIPLES_WEIGHT = 0.50
+# Upside band (±) around current price within which a verdict is "fairly_valued".
+_VERDICT_BAND = 0.15
 
 
 async def run_valuation(
@@ -50,7 +51,8 @@ async def run_valuation(
     net_debt = _get_net_debt(data)
     shares = _get_shares(data)
     current_price = data.company.current_price or 0
-    forward_eps = get_forward_eps(data.analyst_estimates)
+    forward_eps_estimate = _get_forward_eps_estimate(data)
+    forward_eps = forward_eps_estimate.eps_estimate if forward_eps_estimate else get_forward_eps(data.analyst_estimates)
 
     if latest_revenue <= 0:
         raise ValueError("Cannot run valuation: no revenue data available")
@@ -90,14 +92,16 @@ async def run_valuation(
     # Record forward EPS
     if forward_eps is not None:
         data_quality["forward_eps"] = round(forward_eps, 2)
-        data_quality["forward_eps_source"] = "analyst_consensus_next_fy"
+        data_quality["forward_eps_basis"] = "next_fiscal_year"
+        data_quality["forward_eps_period"] = forward_eps_estimate.period if forward_eps_estimate else "unknown"
+        data_quality["forward_eps_source"] = "fmp_annual_analyst_estimates"
     else:
         data_quality["forward_eps"] = "not_available"
 
     # Denominator mismatch note
     data_quality["pe_denominator_note"] = (
         "Historical P/E uses trailing EPS; applied to forward EPS. "
-        "Peer and justified P/E use forward EPS for consistency."
+        "Peer P/E uses forward EPS. DCF-implied P/E is only a cross-check, not a P/E input."
     )
 
     # --- Cross-validate FMP EPS with Yahoo Finance ---
@@ -205,48 +209,34 @@ async def run_valuation(
         else:
             data_quality["peer_comparison"] = "not_available"
 
-    # --- Run base DCF first to compute justified P/E ---
+    # --- Run base DCF first to compute the DCF-implied P/E cross-check ---
     base_dcf = run_dcf(base_a, latest_revenue, net_debt, shares, analyst_revenues=analyst_revenues or None)
     justified_pe = compute_justified_pe(base_dcf.per_share_value, forward_eps)
     if justified_pe is not None:
-        data_quality["justified_pe"] = round(justified_pe, 1)
+        data_quality["dcf_implied_pe_cross_check"] = round(justified_pe, 1)
 
-    # --- Run models for each scenario ---
+    # --- Run models for each scenario (reuse the already-computed base DCF) ---
     scenarios = {}
     base_pe_mult = None
     for label, assumptions in [("bear", bear_a), ("base", base_a), ("bull", bull_a)]:
-        dcf_result = run_dcf(assumptions, latest_revenue, net_debt, shares, analyst_revenues=analyst_revenues or None)
+        dcf_result = base_dcf if label == "base" else run_dcf(
+            assumptions, latest_revenue, net_debt, shares, analyst_revenues=analyst_revenues or None
+        )
         mult_result = run_multiples(
             data, label, forward_eps,
             yearly_pe_ranges=yearly_pe_ranges,
             forward_eps_growth=fwd_eps_growth,
             peer_pe_data=peer_pe_data,
-            justified_pe=justified_pe,
         )
 
         if label == "base":
             base_pe_mult = mult_result.pe_multiple
 
-        # Blend DCF and forward P/E
-        dcf_price = dcf_result.per_share_value
-        pe_price = mult_result.forward_pe_value or 0
-
-        if pe_price > 0 and dcf_price > 0:
-            blended = DCF_WEIGHT * dcf_price + MULTIPLES_WEIGHT * pe_price
-        elif dcf_price > 0:
-            blended = dcf_price
-            data_quality[f"{label}_blend"] = "dcf_only (no forward EPS)"
-        elif pe_price > 0:
-            blended = pe_price
-            data_quality[f"{label}_blend"] = "forward_pe_only (dcf failed)"
-        else:
-            blended = 0
-
         scenarios[label] = ScenarioResult(
             label=label,
             dcf=dcf_result,
             multiples=mult_result,
-            blended_per_share=round(blended, 2),
+            blended_per_share=None,
         )
 
     # --- 5-year forward trend (using base P/E multiple) ---
@@ -273,26 +263,42 @@ async def run_valuation(
                 f"The result is highly sensitive to the terminal growth rate and WACC."
             )
 
-    # --- Margin of Safety ---
+    # --- Standalone valuation views ---
+    dcf_view = _build_view(
+        label="DCF Intrinsic Value",
+        methodology="discounted_cash_flow",
+        current_price=current_price,
+        bear_value=scenarios["bear"].dcf.per_share_value,
+        base_value=scenarios["base"].dcf.per_share_value,
+        bull_value=scenarios["bull"].dcf.per_share_value,
+        notes=[
+            "Standalone intrinsic value view based on projected free cash flow and WACC.",
+            "Not averaged with market multiple valuation.",
+        ],
+    )
+    pe_view = _build_view(
+        label="Forward P/E Market Multiple",
+        methodology="forward_pe_next_fiscal_year",
+        current_price=current_price,
+        bear_value=scenarios["bear"].multiples.forward_pe_value,
+        base_value=scenarios["base"].multiples.forward_pe_value,
+        bull_value=scenarios["bull"].multiples.forward_pe_value,
+        notes=[
+            "Standalone market multiple view: next fiscal year EPS multiplied by selected P/E multiple.",
+            "P/E multiple uses historical P/E and manual peers when available; DCF is not an input.",
+        ],
+    )
+
+    # --- Margin of Safety (compatibility field; mirrors the standalone DCF view) ---
     margin_of_safety = None
-    if current_price > 0:
-        base_val = scenarios["base"].blended_per_share
-        bear_val = scenarios["bear"].blended_per_share
-        bull_val = scenarios["bull"].blended_per_share
-        upside_pct = (base_val - current_price) / current_price
-        if upside_pct > 0.15:
-            verdict = "undervalued"
-        elif upside_pct < -0.15:
-            verdict = "overvalued"
-        else:
-            verdict = "fairly_valued"
+    if current_price > 0 and dcf_view.verdict is not None:
         margin_of_safety = MarginOfSafety(
             current_price=round(current_price, 2),
-            base_intrinsic=round(base_val, 2),
-            bear_intrinsic=round(bear_val, 2),
-            bull_intrinsic=round(bull_val, 2),
-            upside_pct=round(upside_pct, 4),
-            verdict=verdict,
+            base_intrinsic=dcf_view.base_value or 0,
+            bear_intrinsic=dcf_view.bear_value or 0,
+            bull_intrinsic=dcf_view.bull_value or 0,
+            upside_pct=dcf_view.upside_pct,
+            verdict=dcf_view.verdict,
         )
 
     # --- Reverse DCF ---
@@ -313,6 +319,12 @@ async def run_valuation(
         bear=scenarios["bear"],
         base=scenarios["base"],
         bull=scenarios["bull"],
+        dcf_view=dcf_view,
+        pe_view=pe_view,
+        forward_eps_metadata=_build_forward_eps_metadata(
+            forward_eps_estimate,
+            latest_fiscal_year_end=fy_end_date,
+        ),
         forward_trend=forward_trend,
         historical_pe_ranges=yearly_pe_ranges,
         peer_comparison=peer_comparison,
@@ -327,6 +339,80 @@ async def run_valuation(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _get_forward_eps_estimate(data: FinancialDataResponse) -> AnalystEstimateData | None:
+    """Return the next fiscal year FMP annual EPS estimate used by P/E valuation."""
+    estimates = [
+        e for e in data.analyst_estimates
+        if e.eps_estimate is not None and e.source == "fmp" and e.period and e.period.isdigit()
+    ]
+    estimates.sort(key=lambda e: e.period)
+    return estimates[0] if estimates else None
+
+
+def _build_forward_eps_metadata(
+    estimate: AnalystEstimateData | None,
+    latest_fiscal_year_end: str | None,
+) -> ForwardEpsMetadata | None:
+    if estimate is None or estimate.eps_estimate is None:
+        return None
+    from app.repositories import data_pull_log_repository
+    fiscal_year = int(estimate.period) if estimate.period and estimate.period.isdigit() else None
+    fiscal_year_end = None
+    if fiscal_year and latest_fiscal_year_end:
+        fiscal_year_end = _infer_fiscal_year_end(latest_fiscal_year_end, fiscal_year)
+    return ForwardEpsMetadata(
+        basis="next_fiscal_year",
+        period=f"FY{estimate.period}" if estimate.period else None,
+        fiscal_year=fiscal_year,
+        fiscal_year_end=fiscal_year_end,
+        eps=round(estimate.eps_estimate, 2),
+        source="fmp_annual_analyst_estimates",
+        as_of_date=data_pull_log_repository.today_str(),
+    )
+
+
+def _infer_fiscal_year_end(latest_fiscal_year_end: str, fiscal_year: int) -> str | None:
+    """Infer future FY end by reusing the latest reported fiscal year month/day."""
+    if len(latest_fiscal_year_end) < 4:
+        return None
+    return f"{fiscal_year:04d}{latest_fiscal_year_end[4:]}"
+
+
+def _classify_verdict(upside_pct: float) -> str:
+    """Map base-case upside to a valuation verdict (±15% band)."""
+    if upside_pct > _VERDICT_BAND:
+        return "undervalued"
+    if upside_pct < -_VERDICT_BAND:
+        return "overvalued"
+    return "fairly_valued"
+
+
+def _build_view(
+    label: str,
+    methodology: str,
+    current_price: float,
+    bear_value: float | None,
+    base_value: float | None,
+    bull_value: float | None,
+    notes: list[str],
+) -> ValuationView:
+    upside_pct = None
+    verdict = None
+    if current_price > 0 and base_value is not None:
+        upside_pct = round((base_value - current_price) / current_price, 4)
+        verdict = _classify_verdict(upside_pct)
+    return ValuationView(
+        label=label,
+        methodology=methodology,
+        bear_value=round(bear_value, 2) if bear_value is not None else None,
+        base_value=round(base_value, 2) if base_value is not None else None,
+        bull_value=round(bull_value, 2) if bull_value is not None else None,
+        upside_pct=upside_pct,
+        verdict=verdict,
+        notes=notes,
+    )
+
 
 def _compute_reverse_dcf(
     current_price: float,

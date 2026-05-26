@@ -2,7 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.db.financial import Valuation
 
-MODEL_VERSION = "dcf_pe_blend_v1"
+MODEL_VERSION = "dcf_pe_separate_v2"
 
 
 def upsert(db: Session, ticker: str, valuation_date: str, result_dict: dict, model_version: str = MODEL_VERSION) -> None:

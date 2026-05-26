@@ -1,6 +1,6 @@
 # Stock Research - Valuation App
 
-A full-stack stock valuation tool for US equities. It collects company financials, estimates, filings, daily market prices, and optional LLM signals, then runs a blended DCF + forward P/E valuation with persisted historical results.
+A full-stack stock valuation tool for US equities. It collects company financials, estimates, filings, daily market prices, and optional LLM signals, then shows DCF and forward P/E as separate valuation frameworks with persisted historical results.
 
 ## What It Does
 
@@ -9,8 +9,9 @@ Enter a ticker symbol and the app:
 1. Fetches company, financial, estimate, filing, and market price data from SEC EDGAR, FMP, Finnhub, Yahoo Finance, and optional FRED.
 2. Stores all historical data in PostgreSQL `tb_` tables instead of overwriting old periods.
 3. Runs a DCF model using annual financial reports, analyst revenue estimates, FCF margins, and CAPM-style WACC.
-4. Runs a forward P/E model using historical P/E, DCF-justified P/E, and manual peer comparison when manual peers are configured.
-5. Saves each valuation result by ticker, valuation date, and model version.
+4. Runs a standalone forward P/E model using next fiscal year EPS, historical P/E, and manual peer comparison when manual peers are configured.
+5. Shows DCF and forward P/E as separate valuation views instead of averaging them into one target.
+6. Saves each valuation result by ticker, valuation date, and model version.
 
 ## Architecture
 
@@ -187,6 +188,17 @@ curl -X POST http://localhost:8000/api/valuation/AAPL
 
 The DCF model projects revenue and free cash flow, discounts them by WACC, adds terminal value, subtracts net debt, and divides by diluted shares.
 
+Core formula:
+
+```text
+FCF_t = Revenue_t * FCF margin
+PV(FCF_t) = FCF_t / (1 + WACC)^t
+Terminal Value = FCF_final * (1 + terminal_growth) / (WACC - terminal_growth)
+Enterprise Value = sum(PV(FCFs)) + PV(Terminal Value)
+Equity Value = Enterprise Value - Net Debt
+DCF Per Share = Equity Value / Diluted Shares
+```
+
 Primary assumptions:
 
 | Input | Method |
@@ -196,6 +208,15 @@ Primary assumptions:
 | WACC | CAPM with levered beta, market-cap capital structure, optional FRED 10Y Treasury risk-free rate |
 | Terminal growth | Scenario-based Gordon Growth assumption with safety clamp |
 
+Revenue projection:
+
+| Case | Behavior |
+|---|---|
+| At least 5 annual analyst revenue estimates are available | Uses those year-by-year revenue estimates directly |
+| Fewer than 5 analyst revenue estimates are available | Falls back to compounding latest actual revenue by the scenario growth rate |
+
+Current DCF output appears in `dcf_view` and in each scenario's `dcf` object. It is not blended with P/E.
+
 ### Forward P/E Model
 
 The P/E model combines available inputs and reweights automatically when an input is missing:
@@ -204,9 +225,28 @@ The P/E model combines available inputs and reweights automatically when an inpu
 |---|---:|---|
 | Historical P/E | 50% | Uses daily Yahoo Finance prices and annual EPS history |
 | Manual peer P/E | 30% | Only runs when manual peers are configured |
-| DCF-justified P/E | 20% | DCF base value divided by forward EPS |
 
-Forward EPS comes from analyst estimates and is cross-checked with Yahoo Finance when available.
+Forward EPS uses the next fiscal year annual EPS estimate from FMP analyst estimates. It is not NTM EPS. The response exposes the EPS basis, fiscal year label, inferred fiscal year end date when available, source, and as-of date.
+
+Forward P/E formula:
+
+```text
+Forward P/E Value = Next Fiscal Year EPS * Selected P/E Multiple
+```
+
+DCF-implied P/E is only shown as a cross-check in data quality. It is not used to set the P/E multiple.
+
+### Output Structure
+
+DCF and forward P/E are not averaged into a blended target. The valuation response shows two standalone views:
+
+| View | Meaning |
+|---|---|
+| `dcf_view` | Intrinsic value range from discounted cash flow assumptions |
+| `pe_view` | Market multiple range from next fiscal year EPS multiplied by selected P/E multiples |
+| `forward_eps_metadata` | Explicit EPS basis, fiscal year period, fiscal year end, source, and as-of date |
+
+Legacy scenario fields still include `bear`, `base`, and `bull` with detailed `dcf` and `multiples` objects, but `blended_per_share` is deprecated and no longer used as the main valuation target.
 
 ### Saved Results
 
@@ -214,6 +254,12 @@ Each valuation is saved into `tb_valuation` using:
 
 ```text
 ticker + valuation_date + model_version
+```
+
+Current model version:
+
+```text
+dcf_pe_separate_v2
 ```
 
 Multiple runs on the same day/model update the same row; valuations on different dates are preserved.
@@ -246,6 +292,9 @@ docker exec stock-research-db-1 psql -U postgres -d stockapp -c "\dt"
 - FMP and Finnhub may return empty data or provider-specific errors depending on the subscription tier.
 - Manual peers are required for peer valuation. This avoids poor automated peer choices, but requires user curation.
 - FRED is optional. If unavailable, the model uses the default risk-free rate.
+- DCF currently uses analyst revenue estimates only when at least 5 annual estimates are available; otherwise it falls back to a flat scenario growth path.
+- The DCF terminal value formula is standard when `WACC > terminal_growth`; if that safety condition is violated, the code uses a rough fallback cap.
+- Final WACC should be reviewed after any signal adjustments to ensure it remains inside the intended range.
 - The frontend still reflects the current MVP flow and may need UI updates for manual peer management and database inspection.
 
 ## License

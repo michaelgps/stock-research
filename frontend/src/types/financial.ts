@@ -75,6 +75,7 @@ export interface MultiplesResult {
   forward_eps: number | null;
   pe_multiple: number | null;
   justified_pe: number | null;
+  details: Record<string, unknown>;
 }
 
 export interface PeerPEData {
@@ -98,7 +99,28 @@ export interface ScenarioResult {
   label: string;
   dcf: DCFResult;
   multiples: MultiplesResult;
-  blended_per_share: number;
+  blended_per_share: number | null;
+}
+
+export interface ValuationView {
+  label: string;
+  methodology: string;
+  bear_value: number | null;
+  base_value: number | null;
+  bull_value: number | null;
+  upside_pct: number | null;
+  verdict: string | null;
+  notes: string[];
+}
+
+export interface ForwardEpsMetadata {
+  basis: string;
+  period: string | null;
+  fiscal_year: number | null;
+  fiscal_year_end: string | null;
+  eps: number | null;
+  source: string | null;
+  as_of_date: string | null;
 }
 
 export interface ForwardYearEstimate {
@@ -123,6 +145,9 @@ export interface ValuationResponse {
   bear: ScenarioResult;
   base: ScenarioResult;
   bull: ScenarioResult;
+  dcf_view: ValuationView;
+  pe_view: ValuationView;
+  forward_eps_metadata: ForwardEpsMetadata | null;
   forward_trend: ForwardYearEstimate[];
   historical_pe_ranges: YearlyPERange[];
   peer_comparison: PeerComparison | null;

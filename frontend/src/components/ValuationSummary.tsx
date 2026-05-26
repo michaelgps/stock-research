@@ -1,4 +1,4 @@
-import type { ValuationResponse } from "../types/financial";
+import type { ValuationResponse, ValuationView } from "../types/financial";
 
 interface ValuationSummaryProps {
   valuation: ValuationResponse;
@@ -8,117 +8,122 @@ function pct(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+function money(value: number | null | undefined): string {
+  return value == null ? "N/A" : `$${value.toFixed(2)}`;
+}
+
+function upside(value: number | null): string {
+  if (value == null) return "N/A";
+  const pctValue = value * 100;
+  return `${pctValue >= 0 ? "+" : ""}${pctValue.toFixed(1)}%`;
+}
+
+function viewClass(view: ValuationView): string {
+  if (view.verdict === "undervalued") return "upside";
+  if (view.verdict === "overvalued") return "downside";
+  return "";
+}
+
 export function ValuationSummary({ valuation }: ValuationSummaryProps) {
-  const { bear, base, bull, current_price } = valuation;
-
-  // Price range for the visual bar
-  const allPrices = [
-    bear.blended_per_share,
-    base.blended_per_share,
-    bull.blended_per_share,
-    current_price,
-  ];
-  const min = Math.min(...allPrices) * 0.85;
-  const max = Math.max(...allPrices) * 1.1;
-  const range = max - min;
-
-  const toPercent = (price: number) =>
-    Math.max(0, Math.min(100, ((price - min) / range) * 100));
-
-  const bearPct = toPercent(bear.blended_per_share);
-  const basePct = toPercent(base.blended_per_share);
-  const bullPct = toPercent(bull.blended_per_share);
-  const currentPct = toPercent(current_price);
-
-  // Upside/downside from current price
-  const baseUpside = ((base.blended_per_share - current_price) / current_price) * 100;
+  const { bear, base, bull, current_price, dcf_view, pe_view, forward_eps_metadata } = valuation;
+  const views = [dcf_view, pe_view];
 
   return (
     <div className="valuation-summary">
       <h3>Valuation Summary</h3>
 
-      {/* Price target bar */}
-      <div className="price-bar-container">
-        <div className="price-bar">
-          <div
-            className="price-bar-range"
-            style={{ left: `${bearPct}%`, width: `${bullPct - bearPct}%` }}
-          />
-          <div
-            className="price-marker price-marker-bear"
-            style={{ left: `${bearPct}%` }}
-            title={`Bear: $${bear.blended_per_share}`}
-          />
-          <div
-            className="price-marker price-marker-base"
-            style={{ left: `${basePct}%` }}
-            title={`Base: $${base.blended_per_share}`}
-          />
-          <div
-            className="price-marker price-marker-bull"
-            style={{ left: `${bullPct}%` }}
-            title={`Bull: $${bull.blended_per_share}`}
-          />
-          <div
-            className="price-marker price-marker-current"
-            style={{ left: `${currentPct}%` }}
-            title={`Current: $${current_price}`}
-          />
-        </div>
-        <div className="price-bar-labels">
-          <span style={{ left: `${bearPct}%` }} className="bar-label bar-label-bear">
-            Bear ${bear.blended_per_share}
-          </span>
-          <span style={{ left: `${basePct}%` }} className="bar-label bar-label-base">
-            Base ${base.blended_per_share}
-          </span>
-          <span style={{ left: `${bullPct}%` }} className="bar-label bar-label-bull">
-            Bull ${bull.blended_per_share}
-          </span>
-          <span style={{ left: `${currentPct}%` }} className="bar-label bar-label-current">
-            Now ${current_price}
-          </span>
-        </div>
+      <div className="valuation-framework-note">
+        DCF and Forward P/E are shown as separate valuation frameworks. The app no longer averages them into one blended target.
       </div>
 
-      <div className="valuation-verdict">
-        Base target: <strong>${base.blended_per_share}</strong>
-        {" — "}
-        <span className={baseUpside >= 0 ? "upside" : "downside"}>
-          {baseUpside >= 0 ? "+" : ""}{baseUpside.toFixed(1)}%
-        </span>
-        {" vs current $"}{current_price}
+      <div className="valuation-view-grid">
+        {views.map((view) => (
+          <div key={view.methodology} className="valuation-view-card">
+            <div className="valuation-view-header">
+              <div>
+                <div className="valuation-view-kicker">{view.methodology.replace(/_/g, " ")}</div>
+                <h4>{view.label}</h4>
+              </div>
+              <div className={`valuation-view-verdict ${viewClass(view)}`}>
+                {view.verdict ? view.verdict.replace(/_/g, " ") : "N/A"}
+              </div>
+            </div>
+
+            <div className="valuation-view-base">
+              <span>Base</span>
+              <strong>{money(view.base_value)}</strong>
+              <em className={viewClass(view)}>{upside(view.upside_pct)} vs ${current_price.toFixed(2)}</em>
+            </div>
+
+            <div className="valuation-range-row">
+              <div>
+                <span>Bear</span>
+                <strong>{money(view.bear_value)}</strong>
+              </div>
+              <div>
+                <span>Bull</span>
+                <strong>{money(view.bull_value)}</strong>
+              </div>
+            </div>
+
+            <ul className="valuation-view-notes">
+              {view.notes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          </div>
+        ))}
       </div>
 
-      {/* Scenario cards */}
-      <div className="scenario-cards">
+      {forward_eps_metadata && (
+        <div className="forward-eps-callout">
+          <div className="forward-eps-title">Forward EPS Basis</div>
+          <div className="forward-eps-grid">
+            <div>
+              <span>Basis</span>
+              <strong>{forward_eps_metadata.basis.replace(/_/g, " ")}</strong>
+            </div>
+            <div>
+              <span>Period</span>
+              <strong>{forward_eps_metadata.period ?? "N/A"}</strong>
+            </div>
+            <div>
+              <span>FY End</span>
+              <strong>{forward_eps_metadata.fiscal_year_end ?? "N/A"}</strong>
+            </div>
+            <div>
+              <span>EPS</span>
+              <strong>{money(forward_eps_metadata.eps)}</strong>
+            </div>
+            <div>
+              <span>Source</span>
+              <strong>{forward_eps_metadata.source?.replace(/_/g, " ") ?? "N/A"}</strong>
+            </div>
+            <div>
+              <span>As of</span>
+              <strong>{forward_eps_metadata.as_of_date ?? "N/A"}</strong>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="scenario-cards split-scenario-cards">
         {[bear, base, bull].map((s) => (
           <div key={s.label} className={`scenario-card scenario-${s.label}`}>
             <div className="scenario-label">{s.label}</div>
-            <div className="scenario-blended">${s.blended_per_share}</div>
             <div className="scenario-breakdown">
               <div className="breakdown-row">
-                <span className="breakdown-label">DCF</span>
-                <span className="breakdown-value">${s.dcf.per_share_value.toFixed(1)}</span>
+                <span className="breakdown-label">DCF value</span>
+                <span className="breakdown-value">{money(s.dcf.per_share_value)}</span>
               </div>
               <div className="breakdown-row">
-                <span className="breakdown-label">Fwd P/E</span>
-                <span className="breakdown-value">
-                  {s.multiples.forward_pe_value
-                    ? `$${s.multiples.forward_pe_value}`
-                    : "N/A"}
-                </span>
+                <span className="breakdown-label">Forward P/E value</span>
+                <span className="breakdown-value">{money(s.multiples.forward_pe_value)}</span>
               </div>
               {s.multiples.pe_multiple && (
                 <div className="breakdown-row">
-                  <span className="breakdown-label">P/E mult</span>
+                  <span className="breakdown-label">P/E multiple</span>
                   <span className="breakdown-value">{s.multiples.pe_multiple.toFixed(1)}x</span>
-                </div>
-              )}
-              {s.label === "base" && s.multiples.justified_pe && (
-                <div className="breakdown-row">
-                  <span className="breakdown-label">Justified P/E</span>
-                  <span className="breakdown-value">{s.multiples.justified_pe.toFixed(1)}x</span>
                 </div>
               )}
             </div>
@@ -132,7 +137,6 @@ export function ValuationSummary({ valuation }: ValuationSummaryProps) {
         ))}
       </div>
 
-      {/* Data quality notes */}
       {Object.keys(valuation.data_quality).length > 0 && (
         <details className="data-quality">
           <summary>Data Quality Notes</summary>
@@ -147,7 +151,6 @@ export function ValuationSummary({ valuation }: ValuationSummaryProps) {
         </details>
       )}
 
-      {/* Signal adjustments */}
       {Object.keys(valuation.signal_adjustments).length > 0 && (
         <details className="signal-adjustments">
           <summary>Signal Adjustments (LLM)</summary>
