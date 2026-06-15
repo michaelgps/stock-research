@@ -31,6 +31,8 @@ class MultiplesResult(BaseModel):
     forward_pe_value: float | None = None  # price from forward P/E
     forward_eps: float | None = None  # the forward EPS used
     pe_multiple: float | None = None  # the P/E multiple applied
+    pe_low: float | None = None
+    pe_high: float | None = None
     justified_pe: float | None = None  # deprecated: DCF cross-check, not used in P/E valuation
     details: dict = Field(default_factory=dict)
 
@@ -70,17 +72,32 @@ class ForwardYearEstimate(BaseModel):
     """One year of forward valuation."""
     year: str
     eps: float
+    pe_multiple: float | None = None
     implied_price: float  # eps × base P/E multiple
 
 
-class FiscalYearPEScenario(BaseModel):
-    """One P/E percentile scenario inside a fiscal-year valuation window."""
+class FiscalYearPECase(BaseModel):
+    """One automatic P/E range case inside a fiscal-year valuation window."""
     label: str
-    percentile: str
-    pe_multiple: float | None = None
-    forward_pe_value: float | None = None
-    upside_pct: float | None = None
+    method: str
+    pe_low: float
+    pe_mid: float
+    pe_high: float
+    value_low: float
+    value_mid: float
+    value_high: float
+    upside_low_pct: float | None = None
+    upside_mid_pct: float | None = None
+    upside_high_pct: float | None = None
     verdict: str | None = None
+    weighted_eps_growth: float | None = None
+    growth_curve: str | None = None
+    quality_adjustment: float = 0
+    deceleration_adjustment: float = 0
+    uncertainty_adjustment: float = 0
+    uncertainty_reasons: list[str] = Field(default_factory=list)
+    historical_guardrail_pe: float | None = None
+    explanation: str
 
 
 class FiscalYearValuationWindow(BaseModel):
@@ -95,7 +112,7 @@ class FiscalYearValuationWindow(BaseModel):
     forward_pe_value: float | None = None
     forward_pe_upside_pct: float | None = None
     forward_pe_verdict: str | None = None
-    pe_scenarios: list[FiscalYearPEScenario] = Field(default_factory=list)
+    pe_cases: list[FiscalYearPECase] = Field(default_factory=list)
     dcf_present_value: float | None = None
     dcf_rolled_forward_value: float | None = None
     dcf_rolled_forward_upside_pct: float | None = None

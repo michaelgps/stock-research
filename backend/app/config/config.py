@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     # API Keys
     fmp_api_key: str = ""
     finnhub_api_key: str = ""
+    alpha_vantage_api_key: str = ""
     anthropic_api_key: str = ""
     fred_api_key: str = ""
 

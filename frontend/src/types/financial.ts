@@ -126,16 +126,31 @@ export interface ForwardEpsMetadata {
 export interface ForwardYearEstimate {
   year: string;
   eps: number;
+  pe_multiple: number | null;
   implied_price: number;
 }
 
-export interface FiscalYearPEScenario {
+export interface FiscalYearPECase {
   label: string;
-  percentile: string;
-  pe_multiple: number | null;
-  forward_pe_value: number | null;
-  upside_pct: number | null;
+  method: string;
+  pe_low: number;
+  pe_mid: number;
+  pe_high: number;
+  value_low: number;
+  value_mid: number;
+  value_high: number;
+  upside_low_pct: number | null;
+  upside_mid_pct: number | null;
+  upside_high_pct: number | null;
   verdict: string | null;
+  weighted_eps_growth: number | null;
+  growth_curve: string | null;
+  quality_adjustment: number;
+  deceleration_adjustment: number;
+  uncertainty_adjustment: number;
+  uncertainty_reasons: string[];
+  historical_guardrail_pe: number | null;
+  explanation: string;
 }
 
 export interface FiscalYearValuationWindow {
@@ -149,7 +164,7 @@ export interface FiscalYearValuationWindow {
   forward_pe_value: number | null;
   forward_pe_upside_pct: number | null;
   forward_pe_verdict: string | null;
-  pe_scenarios: FiscalYearPEScenario[];
+  pe_cases: FiscalYearPECase[];
   dcf_present_value: number | null;
   dcf_rolled_forward_value: number | null;
   dcf_rolled_forward_upside_pct: number | null;

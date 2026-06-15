@@ -1,7 +1,7 @@
 """
 Valuation engine orchestrator.
-Runs DCF and forward P/E as separate bear/base/bull valuation views.
-Includes 5-year forward trend, historical P/E context, and peer comparison.
+Runs base DCF as a reference and forward P/E as fiscal-year case windows.
+Includes forward EPS validation, historical P/E context, and peer comparison.
 """
 
 import logging
@@ -20,7 +20,6 @@ from app.data_structure.valuation import (
     ValuationView,
     ForwardEpsMetadata,
     FiscalYearValuationWindow,
-    FiscalYearPEScenario,
 )
 from app.logic.valuation.assumptions import build_scenarios, get_forward_eps
 from app.logic.valuation.dcf import run_dcf
@@ -31,6 +30,7 @@ from app.logic.valuation.multiples import (
     compute_yearly_pe_ranges,
     compute_forward_trend,
     compute_justified_pe,
+    compute_auto_pe_cases,
     get_forward_eps_growth,
 )
 
@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 # Upside band (±) around current price within which a verdict is "fairly_valued".
 _VERDICT_BAND = 0.15
+_MAX_FORWARD_VALUATION_YEARS = 3
 
 
 async def run_valuation(
@@ -108,8 +109,8 @@ async def run_valuation(
 
     # Denominator mismatch note
     data_quality["pe_denominator_note"] = (
-        "Historical P/E uses trailing EPS; applied to forward EPS. "
-        "P/E scenarios use the ticker's historical P25/P50/P75 multiples. "
+        "Forward P/E uses an automatic range based on EPS growth, company quality, "
+        "growth deceleration, estimate uncertainty, and historical P/E guardrails. "
         "DCF-implied P/E and manual peers are cross-checks only, not P/E inputs."
     )
 
@@ -190,6 +191,84 @@ async def run_valuation(
         logger.warning("Yahoo Finance cross-validation failed: %s", e)
         data_quality["yf_cross_validation"] = "error"
 
+    try:
+        alpha_validation = None
+        if db is not None:
+            from app.db.financial import Estimate
+            from app.repositories import data_pull_log_repository
+
+            today = data_pull_log_repository.today_str()
+            cached_alpha = db.query(Estimate).filter(
+                Estimate.ticker == data.company.ticker,
+                Estimate.estimate_date == today,
+                Estimate.source == "alpha_vantage",
+                Estimate.estimate_period == "eps_validation",
+            ).first()
+            if cached_alpha and cached_alpha.raw_data_json and data_pull_log_repository.has_success(
+                db, data.company.ticker, "eps_validation", "alpha_vantage", today
+            ):
+                alpha_validation = cached_alpha.raw_data_json
+
+        if alpha_validation is None:
+            alpha_validation = await _cross_validate_alpha_vantage_eps(data)
+            if db is not None:
+                from app.db.financial import Estimate
+                from app.repositories import data_pull_log_repository
+
+                today = data_pull_log_repository.today_str()
+                row = db.query(Estimate).filter(
+                    Estimate.ticker == data.company.ticker,
+                    Estimate.estimate_date == today,
+                    Estimate.source == "alpha_vantage",
+                    Estimate.estimate_period == "eps_validation",
+                ).first()
+                values = {
+                    "record_type": "eps_validation",
+                    "revenue_estimate": None,
+                    "eps_estimate": None,
+                    "revenue_growth_estimate": None,
+                    "actual_eps": None,
+                    "estimated_eps": None,
+                    "surprise": None,
+                    "surprise_percent": None,
+                    "buy_count": None,
+                    "hold_count": None,
+                    "sell_count": None,
+                    "target_price": None,
+                    "raw_data_json": alpha_validation,
+                }
+                if row:
+                    for key, value in values.items():
+                        setattr(row, key, value)
+                else:
+                    db.add(Estimate(
+                        ticker=data.company.ticker,
+                        estimate_date=today,
+                        source="alpha_vantage",
+                        estimate_period="eps_validation",
+                        **values,
+                    ))
+                db.commit()
+                status = "success" if alpha_validation.get("configured") else "empty"
+                data_pull_log_repository.mark(
+                    db,
+                    data.company.ticker,
+                    "eps_validation",
+                    "alpha_vantage",
+                    status,
+                    records_inserted=1 if status == "success" else 0,
+                )
+
+        data_quality["alpha_vantage_eps_validation"] = alpha_validation
+    except Exception as e:
+        logger.warning("Alpha Vantage EPS validation failed: %s", e)
+        data_quality["alpha_vantage_eps_validation"] = "error"
+
+    data_quality["forward_eps_validation_policy"] = (
+        "Primary valuation uses only the first 3 forward fiscal-year EPS estimates. "
+        "Yahoo and optional Alpha Vantage are cross-checks to catch obvious FMP estimate errors."
+    )
+
     # --- Fetch peer forward P/E (with growth adjustment) ---
     peer_pe_data = await fetch_peer_pe(
         data.company.ticker,
@@ -235,6 +314,9 @@ async def run_valuation(
             data, label, forward_eps,
             yearly_pe_ranges=yearly_pe_ranges,
             peer_pe_data=peer_pe_data,
+            target_period=forward_eps_estimate.period if forward_eps_estimate else None,
+            latest_fiscal_year_end=fy_end_date,
+            latest_actual_eps=actual_eps,
         )
 
         if label == "base":
@@ -247,13 +329,31 @@ async def run_valuation(
             blended_per_share=None,
         )
 
-    # --- 5-year forward trend (using base P/E multiple) ---
+    # --- 5-year forward trend (using period-specific base P/E multiples) ---
+    pe_case_details_by_period = _build_pe_case_details_by_period(
+        data=data,
+        yearly_pe_ranges=yearly_pe_ranges,
+        current_price=current_price,
+        latest_fiscal_year_end=fy_end_date,
+        latest_actual_eps=actual_eps,
+    )
+    base_pe_by_period = {
+        period: cases[0]["pe_mid"]
+        for period, cases in pe_case_details_by_period.items()
+        if cases
+    }
     trend_raw = compute_forward_trend(
         data.analyst_estimates,
         base_pe_mult or 20,
+        pe_by_period=base_pe_by_period,
     )
     forward_trend = [
-        ForwardYearEstimate(year=t["year"], eps=t["eps"], implied_price=t["implied_price"])
+        ForwardYearEstimate(
+            year=t["year"],
+            eps=t["eps"],
+            pe_multiple=t.get("pe_multiple"),
+            implied_price=t["implied_price"],
+        )
         for t in trend_raw
     ]
 
@@ -292,8 +392,8 @@ async def run_valuation(
         base_value=scenarios["base"].multiples.forward_pe_value,
         bull_value=scenarios["bull"].multiples.forward_pe_value,
         notes=[
-            "Standalone market multiple view: next fiscal year EPS multiplied by selected P/E multiple.",
-            "P/E scenarios use the ticker's historical P25/P50/P75 multiples; DCF and peers are not inputs.",
+            "Standalone market multiple view: next fiscal year EPS multiplied by the automatic P/E midpoint.",
+            "The main UI shows the full automatic P/E low/mid/high range and any multi-case output.",
         ],
     )
 
@@ -333,6 +433,7 @@ async def run_valuation(
         pe_multiple=base_pe_mult,
         current_price=current_price,
         scenario_results=scenarios,
+        pe_case_details_by_period=pe_case_details_by_period,
     )
 
     return ValuationResponse(
@@ -402,13 +503,112 @@ def _public_historical_pe_ranges(yearly_pe_ranges: list[dict]) -> list[dict]:
 
 def _summarize_pe_eps_basis(yearly_pe_ranges: list[dict]) -> str:
     bases = {row.get("eps_basis") for row in yearly_pe_ranges if row.get("eps_basis")}
-    if bases == {"adjusted_ttm_eps"}:
-        return "adjusted_ttm_eps"
-    if "adjusted_ttm_eps" in bases or "mixed_adjusted_ttm_and_gaap" in bases:
-        return "mixed_adjusted_ttm_and_gaap"
+    if "adjusted_ttm_eps" in bases:
+        return "adjusted_ttm_eps_preferred"
     if bases:
         return "gaap_annual_eps"
     return "unknown"
+
+
+async def _cross_validate_alpha_vantage_eps(
+    data: FinancialDataResponse,
+    threshold: float = 0.15,
+) -> dict:
+    """Cross-check FMP forward EPS estimates against optional Alpha Vantage data."""
+    from app.logic.data_sources import alpha_vantage
+
+    if not alpha_vantage._is_configured():
+        return {
+            "configured": False,
+            "source": "alpha_vantage",
+            "matches": [],
+            "warning": False,
+            "note": "ALPHA_VANTAGE_API_KEY is not configured.",
+        }
+
+    fmp_estimates = [
+        estimate for estimate in data.analyst_estimates
+        if (
+            estimate.source == "fmp"
+            and estimate.period
+            and str(estimate.period).isdigit()
+            and estimate.eps_estimate is not None
+            and estimate.eps_estimate > 0
+        )
+    ]
+    fmp_estimates.sort(key=lambda estimate: int(estimate.period))
+    fmp_estimates = fmp_estimates[:_MAX_FORWARD_VALUATION_YEARS]
+
+    alpha_estimates = await alpha_vantage.get_annual_eps_estimates(
+        data.company.ticker,
+        limit=_MAX_FORWARD_VALUATION_YEARS,
+    )
+    alpha_by_period = {item["period"]: item for item in alpha_estimates}
+
+    matches = []
+    warning = False
+    for estimate in fmp_estimates:
+        period = str(estimate.period)
+        alpha = alpha_by_period.get(period)
+        alpha_eps = alpha.get("eps_estimate") if alpha else None
+        divergence = None
+        period_warning = False
+        if alpha_eps and estimate.eps_estimate and estimate.eps_estimate > 0:
+            divergence = abs(alpha_eps - estimate.eps_estimate) / estimate.eps_estimate
+            period_warning = divergence > threshold
+            warning = warning or period_warning
+        matches.append({
+            "period": period,
+            "fmp_eps": round(estimate.eps_estimate, 4),
+            "alpha_vantage_eps": round(alpha_eps, 4) if alpha_eps is not None else None,
+            "divergence": round(divergence, 3) if divergence is not None else None,
+            "warning": period_warning,
+        })
+
+    return {
+        "configured": True,
+        "source": "alpha_vantage",
+        "matches": matches,
+        "warning": warning,
+    }
+
+
+def _build_pe_case_details_by_period(
+    data: FinancialDataResponse,
+    yearly_pe_ranges: list[dict],
+    current_price: float,
+    latest_fiscal_year_end: str | None,
+    latest_actual_eps: float | None,
+) -> dict[str, list[dict]]:
+    """Precompute automatic P/E range cases for every forward fiscal year."""
+    periods = sorted({
+        str(estimate.period)
+        for estimate in data.analyst_estimates
+        if (
+            estimate.period
+            and str(estimate.period).isdigit()
+            and estimate.eps_estimate is not None
+            and estimate.eps_estimate > 0
+            and estimate.source == "fmp"
+        )
+    }, key=int)[:_MAX_FORWARD_VALUATION_YEARS]
+    eps_by_period = {
+        str(estimate.period): estimate.eps_estimate
+        for estimate in data.analyst_estimates
+        if estimate.period and str(estimate.period).isdigit() and estimate.eps_estimate is not None
+    }
+    result: dict[str, list[dict]] = {}
+    for period in periods:
+        result[period] = compute_auto_pe_cases(
+            data=data,
+            yearly_pe_ranges=yearly_pe_ranges,
+            target_period=period,
+            forward_eps=eps_by_period.get(period),
+            current_price=current_price,
+            latest_fiscal_year_end=latest_fiscal_year_end,
+            latest_actual_eps=latest_actual_eps,
+        )
+    return result
 
 
 def _build_fiscal_year_valuation_windows(
@@ -419,6 +619,7 @@ def _build_fiscal_year_valuation_windows(
     pe_multiple: float | None,
     current_price: float,
     scenario_results: dict,
+    pe_case_details_by_period: dict[str, list[dict]] | None = None,
 ) -> list[FiscalYearValuationWindow]:
     """Align Forward P/E targets and rolled-forward DCF values by fiscal-year end."""
     from app.repositories import data_pull_log_repository
@@ -445,10 +646,9 @@ def _build_fiscal_year_valuation_windows(
             dcf_rolled_forward_value = round(dcf_present_value * (1 + discount_rate) ** roll_years, 2)
         forward_pe_upside = _compute_upside(estimate.implied_price, current_price)
         dcf_rolled_forward_upside = _compute_upside(dcf_rolled_forward_value, current_price)
-        pe_scenarios = _build_fiscal_year_pe_scenarios(
-            eps=estimate.eps,
-            current_price=current_price,
-            scenario_results=scenario_results,
+        pe_cases = _build_fiscal_year_pe_cases(
+            period=str(estimate.year),
+            pe_case_details_by_period=pe_case_details_by_period,
         )
 
         windows.append(FiscalYearValuationWindow(
@@ -462,11 +662,11 @@ def _build_fiscal_year_valuation_windows(
             ),
             time_distance_label=_format_time_distance(valuation_date, fiscal_year_end),
             forward_eps=round(estimate.eps, 2),
-            pe_multiple=round(pe_multiple, 1) if pe_multiple is not None else None,
+            pe_multiple=round(estimate.pe_multiple or pe_multiple, 1) if (estimate.pe_multiple or pe_multiple) is not None else None,
             forward_pe_value=round(estimate.implied_price, 2),
             forward_pe_upside_pct=forward_pe_upside,
             forward_pe_verdict=_classify_verdict(forward_pe_upside) if forward_pe_upside is not None else None,
-            pe_scenarios=pe_scenarios,
+            pe_cases=pe_cases,
             dcf_present_value=round(dcf_present_value, 2) if dcf_present_value is not None else None,
             dcf_rolled_forward_value=dcf_rolled_forward_value,
             dcf_rolled_forward_upside_pct=dcf_rolled_forward_upside,
@@ -481,31 +681,37 @@ def _build_fiscal_year_valuation_windows(
     return windows
 
 
-def _build_fiscal_year_pe_scenarios(
-    eps: float,
-    current_price: float,
-    scenario_results: dict,
-) -> list[FiscalYearPEScenario]:
-    scenario_percentiles = {
-        "bear": "P25",
-        "base": "P50 / median",
-        "bull": "P75",
-    }
-    rows: list[FiscalYearPEScenario] = []
-    for label in ("bear", "base", "bull"):
-        scenario = scenario_results.get(label)
-        pe_multiple = scenario.multiples.pe_multiple if scenario else None
-        value = round(eps * pe_multiple, 2) if pe_multiple is not None else None
-        upside_pct = _compute_upside(value, current_price)
-        rows.append(FiscalYearPEScenario(
-            label=label,
-            percentile=scenario_percentiles[label],
-            pe_multiple=round(pe_multiple, 1) if pe_multiple is not None else None,
-            forward_pe_value=value,
-            upside_pct=upside_pct,
-            verdict=_classify_verdict(upside_pct) if upside_pct is not None else None,
+def _build_fiscal_year_pe_cases(
+    period: str,
+    pe_case_details_by_period: dict[str, list[dict]] | None,
+) -> list:
+    from app.data_structure.valuation import FiscalYearPECase
+
+    cases = []
+    for case in (pe_case_details_by_period or {}).get(period, []):
+        cases.append(FiscalYearPECase(
+            label=case["label"],
+            method=case["method"],
+            pe_low=case["pe_low"],
+            pe_mid=case["pe_mid"],
+            pe_high=case["pe_high"],
+            value_low=case["value_low"],
+            value_mid=case["value_mid"],
+            value_high=case["value_high"],
+            upside_low_pct=case.get("upside_low_pct"),
+            upside_mid_pct=case.get("upside_mid_pct"),
+            upside_high_pct=case.get("upside_high_pct"),
+            verdict=_classify_verdict(case["upside_mid_pct"]) if case.get("upside_mid_pct") is not None else None,
+            weighted_eps_growth=case.get("weighted_eps_growth"),
+            growth_curve=case.get("growth_curve"),
+            quality_adjustment=case.get("quality_adjustment", 0),
+            deceleration_adjustment=case.get("deceleration_adjustment", 0),
+            uncertainty_adjustment=case.get("uncertainty_adjustment", 0),
+            uncertainty_reasons=case.get("uncertainty_reasons", []),
+            historical_guardrail_pe=case.get("historical_guardrail_pe"),
+            explanation=case.get("explanation", ""),
         ))
-    return rows
+    return cases
 
 
 def _compute_upside(value: float | None, current_price: float) -> float | None:
