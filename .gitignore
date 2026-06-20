@@ -15,6 +15,7 @@ frontend/build/
 
 # Environment
 .env
+*.pem
 .env.local
 .env.*.local
 
