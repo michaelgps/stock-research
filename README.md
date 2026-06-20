@@ -178,6 +178,54 @@ Open `http://localhost:5173`.
 
 The frontend scripts use Vite's `--configLoader runner` and write TypeScript/Vite build cache to `frontend/.cache` instead of `node_modules/.tmp` or `node_modules/.vite-temp`. This avoids Windows permission errors after rebooting or reinstalling dependencies.
 
+## Cloud Deployment With Render
+
+The repository includes a `render.yaml` Blueprint for deploying:
+
+| Render resource | Project component |
+|---|---|
+| `stock-research-backend` | FastAPI backend from `backend/` |
+| `stock-research-frontend` | Vite static site from `frontend/` |
+| `stock-research-db` | Managed PostgreSQL database |
+
+Recommended first deployment flow:
+
+1. Push the latest code to GitHub.
+2. In Render, choose `New` -> `Blueprint`.
+3. Connect the GitHub repository.
+4. Render reads `render.yaml` and creates the backend, frontend, and Postgres database.
+5. Fill the secret/env vars that are marked `sync: false`.
+
+Backend environment variables:
+
+```env
+APP_ENV=production
+LOG_LEVEL=INFO
+DATABASE_URL=<auto-filled from Render Postgres>
+CORS_ORIGINS=https://your-frontend.onrender.com
+FMP_API_KEY=your_fmp_api_key
+FINNHUB_API_KEY=your_finnhub_api_key
+ALPHA_VANTAGE_API_KEY=your_alpha_vantage_api_key
+FRED_API_KEY=your_fred_api_key
+ANTHROPIC_API_KEY=your_anthropic_api_key
+```
+
+Frontend environment variables:
+
+```env
+VITE_API_BASE_URL=https://your-backend.onrender.com
+```
+
+Important deployment notes:
+
+- Do not commit real API keys.
+- The backend start command on Render is `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+- The frontend build command is `npm ci && npm run build`.
+- `CORS_ORIGINS` can be either comma-separated text or a JSON list.
+- The included database plan is `basic-256mb`, Render's lowest long-lived paid Postgres tier. You can temporarily change it to `free`, but Render's free Postgres is not suitable for long-term use.
+- After the frontend receives its final Render URL, copy that URL into the backend `CORS_ORIGINS`.
+- After the backend receives its final Render URL, copy that URL into the frontend `VITE_API_BASE_URL`.
+
 ## API Endpoints
 
 | Method | Endpoint | Description |
