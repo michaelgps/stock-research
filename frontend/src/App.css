@@ -320,6 +320,22 @@ tr:hover {
   margin-bottom: 1rem;
 }
 
+.analysis-output {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.analysis-loading {
+  margin-bottom: 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #eff6ff 0%, #f8fbff 100%);
+  color: #1e3a8a;
+  font-weight: 700;
+  text-align: center;
+}
+
 .valuation-results {
   animation: fadeIn 0.3s ease;
 }

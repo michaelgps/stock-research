@@ -35,6 +35,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [valuationError, setValuationError] = useState<string | null>(null);
   const [technicalError, setTechnicalError] = useState<string | null>(null);
+  const [activeAnalysis, setActiveAnalysis] = useState<"valuation" | "technical" | null>(null);
 
   const handleSubmit = async (t: string) => {
     setLoading(true);
@@ -61,6 +62,7 @@ function App() {
     setValuationLoading(true);
     setValuationError(null);
     setValuation(null);
+    setActiveAnalysis("valuation");
 
     try {
       const result = await runValuation(ticker);
@@ -79,6 +81,7 @@ function App() {
     setTechnicalLoading(true);
     setTechnicalError(null);
     setTechnicalLevels(null);
+    setActiveAnalysis("technical");
 
     try {
       const result = await fetchTechnicalLevels(ticker);
@@ -91,6 +94,40 @@ function App() {
       setTechnicalLoading(false);
     }
   };
+
+  const valuationPanel = (
+    <>
+      {valuationLoading && (
+        <div className="analysis-loading">Running valuation model...</div>
+      )}
+      {valuation && (
+        <div className="valuation-results">
+          <ValuationSummary valuation={valuation} />
+          <ForwardTrend
+            trend={valuation.forward_trend}
+            currentPrice={valuation.current_price}
+            peMultiple={valuation.base.multiples.pe_multiple}
+          />
+          <HistoricalPE ranges={valuation.historical_pe_ranges} />
+          {valuation.peer_comparison && (
+            <PeerComparison
+              peers={valuation.peer_comparison}
+              tickerPe={valuation.base.multiples.pe_multiple}
+            />
+          )}
+        </div>
+      )}
+    </>
+  );
+
+  const technicalPanel = (
+    <>
+      {technicalLoading && (
+        <div className="analysis-loading">Finding support and resistance zones...</div>
+      )}
+      {technicalLevels && <TechnicalLevels levels={technicalLevels} />}
+    </>
+  );
 
   const handleTextSubmit = async (content: string, sourceType: string) => {
     setTextLoading(true);
@@ -166,26 +203,19 @@ function App() {
               )}
             </div>
 
-            {/* Valuation results */}
-            {valuation && (
-              <div className="valuation-results">
-                <ValuationSummary valuation={valuation} />
-                <ForwardTrend
-                  trend={valuation.forward_trend}
-                  currentPrice={valuation.current_price}
-                  peMultiple={valuation.base.multiples.pe_multiple}
-                />
-                <HistoricalPE ranges={valuation.historical_pe_ranges} />
-                {valuation.peer_comparison && (
-                  <PeerComparison
-                    peers={valuation.peer_comparison}
-                    tickerPe={valuation.base.multiples.pe_multiple}
-                  />
-                )}
-              </div>
-            )}
-
-            {technicalLevels && <TechnicalLevels levels={technicalLevels} />}
+            <div className="analysis-output">
+              {activeAnalysis === "technical" ? (
+                <>
+                  {technicalPanel}
+                  {valuationPanel}
+                </>
+              ) : (
+                <>
+                  {valuationPanel}
+                  {technicalPanel}
+                </>
+              )}
+            </div>
 
             {/* Financial data tables */}
             <FinancialTable
