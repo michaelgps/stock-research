@@ -196,6 +196,33 @@ class Valuation(Base):
     date_modified: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class TechnicalLevel(Base):
+    __tablename__ = "tb_technical_level"
+    __table_args__ = (
+        UniqueConstraint("ticker", "level_date", "source", "level_type", "rank", name="uq_technical_level_day_rank"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(10), index=True)
+    level_date: Mapped[str] = mapped_column(String(10), index=True)
+    source: Mapped[str] = mapped_column(String(50), index=True)
+    level_type: Mapped[str] = mapped_column(String(20), index=True)
+    rank: Mapped[int] = mapped_column(Integer)
+    price_low: Mapped[float | None] = mapped_column(Float)
+    price_high: Mapped[float | None] = mapped_column(Float)
+    center_price: Mapped[float | None] = mapped_column(Float)
+    strength_score: Mapped[float | None] = mapped_column(Float)
+    relevance_score: Mapped[float | None] = mapped_column(Float)
+    strength_label: Mapped[str | None] = mapped_column(String(20))
+    evidence_json: Mapped[dict | list | None] = mapped_column(JSON)
+    invalid_if: Mapped[str | None] = mapped_column(Text)
+    breakout_confirmation: Mapped[str | None] = mapped_column(Text)
+    lookback_days: Mapped[int] = mapped_column(Integer, default=252)
+    raw_data_json: Mapped[dict | list | None] = mapped_column(JSON)
+    date_created: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    date_modified: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class DataPullLog(Base):
     __tablename__ = "tb_data_pull_log"
     __table_args__ = (

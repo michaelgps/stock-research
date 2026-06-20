@@ -303,9 +303,21 @@ tr:hover {
 /* Valuation Trigger                             */
 /* ============================================= */
 
-.valuation-trigger {
+.valuation-trigger,
+.analysis-actions {
   text-align: center;
   margin-bottom: 2rem;
+}
+
+.analysis-actions {
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.analysis-errors {
+  margin-bottom: 1rem;
 }
 
 .valuation-results {
@@ -862,10 +874,504 @@ tr:hover {
 .premium-low { color: #16a34a; }
 
 /* ============================================= */
+/* Technical Levels                              */
+/* ============================================= */
+
+.technical-levels {
+  margin-bottom: 2rem;
+  padding: 1rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at top left, rgba(14, 165, 233, 0.08), transparent 32%),
+    linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
+  animation: fadeIn 0.3s ease;
+}
+
+.technical-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+  margin-bottom: 0.9rem;
+}
+
+.technical-kicker {
+  color: #64748b;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.technical-header h3 {
+  margin: 0.15rem 0 0.35rem;
+  font-size: 1.2rem;
+}
+
+.technical-header p {
+  margin: 0;
+  color: #64748b;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.technical-current-price {
+  min-width: 140px;
+  padding: 0.75rem 0.85rem;
+  border-radius: 12px;
+  background: #0f172a;
+  color: white;
+  text-align: right;
+}
+
+.technical-current-price span {
+  display: block;
+  color: #cbd5e1;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.technical-current-price strong {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 1.55rem;
+}
+
+.technical-stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+}
+
+.technical-stat-row span {
+  padding: 0.3rem 0.55rem;
+  border-radius: 999px;
+  background: #eef6ff;
+  color: #0f4c81;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.technical-map-card {
+  margin: 1rem 0 1.2rem;
+  padding: 0.85rem;
+  border: 1px solid #dbeafe;
+  border-radius: 16px;
+  background: #ffffff;
+}
+
+.technical-map-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  margin-bottom: 0.55rem;
+  color: #64748b;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.technical-map-title strong {
+  color: #0f172a;
+  font-size: 0.82rem;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.technical-price-map {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 260px;
+}
+
+.technical-map-grid {
+  stroke: #cbd5e1;
+  stroke-dasharray: 4 7;
+  stroke-width: 1;
+}
+
+.technical-map-axis {
+  stroke: #334155;
+  stroke-width: 2;
+}
+
+.technical-map-axis-label {
+  fill: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.technical-map-zone {
+  stroke-width: 2;
+}
+
+.technical-map-zone-support {
+  fill: rgba(34, 197, 94, 0.18);
+  stroke: rgba(22, 163, 74, 0.75);
+}
+
+.technical-map-zone-resistance {
+  fill: rgba(239, 68, 68, 0.16);
+  stroke: rgba(220, 38, 38, 0.72);
+}
+
+.technical-map-zone-active {
+  fill: rgba(59, 130, 246, 0.16);
+  stroke: rgba(37, 99, 235, 0.72);
+}
+
+.technical-map-center {
+  stroke-width: 2;
+  stroke-dasharray: 7 6;
+}
+
+.technical-map-center-support { stroke: #15803d; }
+.technical-map-center-resistance { stroke: #b91c1c; }
+.technical-map-center-active { stroke: #1d4ed8; }
+
+.technical-map-zone-label {
+  fill: #0f172a;
+  font-size: 14px;
+  font-weight: 850;
+  text-transform: capitalize;
+}
+
+.technical-map-zone-price {
+  fill: #475569;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.technical-map-label-connector {
+  stroke-width: 1.5;
+  stroke-dasharray: 3 5;
+  opacity: 0.55;
+}
+
+.technical-map-label-connector-support { stroke: #15803d; }
+.technical-map-label-connector-resistance { stroke: #b91c1c; }
+.technical-map-label-connector-active { stroke: #1d4ed8; }
+
+.technical-map-current-line {
+  stroke: #020617;
+  stroke-width: 3;
+}
+
+.technical-map-current-dot {
+  fill: #020617;
+  stroke: #ffffff;
+  stroke-width: 3;
+}
+
+.technical-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  justify-content: center;
+  margin-top: 0.6rem;
+}
+
+.technical-map-legend span {
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.legend-support {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.legend-active {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.legend-resistance {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.technical-map-empty {
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px dashed #cbd5e1;
+  border-radius: 14px;
+  background: #f8fafc;
+  color: #64748b;
+  text-align: center;
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.technical-zone-group {
+  margin-top: 1rem;
+}
+
+.technical-zone-group h4 {
+  margin: 0 0 0.6rem;
+  color: #334155;
+  font-size: 0.82rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.technical-zone-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.85rem;
+}
+
+.technical-zone-card {
+  padding: 0.9rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.technical-zone-support { border-top: 3px solid #16a34a; }
+.technical-zone-resistance { border-top: 3px solid #ef4444; }
+.technical-zone-active { border-top: 3px solid #3b82f6; }
+
+.technical-zone-topline {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: flex-start;
+  margin-bottom: 0.55rem;
+}
+
+.technical-zone-type {
+  color: #64748b;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.technical-zone-price {
+  margin-top: 0.12rem;
+  color: #0f172a;
+  font-size: 1.45rem;
+  font-weight: 800;
+  line-height: 1.15;
+}
+
+.technical-score-pill {
+  min-width: 58px;
+  padding: 0.35rem 0.45rem;
+  border-radius: 10px;
+  text-align: center;
+  font-weight: 850;
+}
+
+.technical-score-pill span {
+  display: block;
+  font-size: 0.64rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.technical-score-strong {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.technical-score-medium {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.technical-score-weak {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.technical-zone-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.6rem;
+}
+
+.technical-zone-meta span {
+  padding: 0.25rem 0.45rem;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.technical-evidence-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.65rem;
+}
+
+.technical-evidence-list span {
+  padding: 0.22rem 0.45rem;
+  border-radius: 6px;
+  background: #ecfdf5;
+  color: #047857;
+  font-size: 0.72rem;
+  font-weight: 750;
+}
+
+.technical-rule {
+  margin: 0.4rem 0 0;
+  color: #475569;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.technical-date {
+  margin: 0.45rem 0 0;
+  color: #94a3b8;
+  font-size: 0.75rem;
+}
+
+.technical-score-details {
+  margin-top: 0.6rem;
+}
+
+.technical-score-details summary {
+  cursor: pointer;
+  color: #64748b;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.technical-score-grid {
+  margin-top: 0.35rem;
+}
+
+.technical-score-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.18rem 0;
+  border-bottom: 1px solid #f1f5f9;
+  color: #64748b;
+  font-size: 0.78rem;
+}
+
+.technical-score-row strong {
+  color: #0f172a;
+}
+
+.technical-empty {
+  padding: 0.8rem;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 0.86rem;
+}
+
+.technical-reference-group {
+  margin-top: 1rem;
+}
+
+.technical-reference-group h4 {
+  margin: 0 0 0.6rem;
+  color: #334155;
+  font-size: 0.82rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.technical-reference-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.7rem;
+}
+
+.technical-reference-card {
+  padding: 0.8rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.reference-support { border-left: 3px solid #16a34a; }
+.reference-resistance { border-left: 3px solid #ef4444; }
+.reference-active { border-left: 3px solid #3b82f6; }
+
+.technical-reference-type {
+  color: #64748b;
+  font-size: 0.68rem;
+  font-weight: 850;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.technical-reference-card strong {
+  display: block;
+  margin-top: 0.15rem;
+  color: #0f172a;
+  font-size: 1rem;
+}
+
+.technical-reference-card span {
+  display: inline-flex;
+  margin-top: 0.2rem;
+  color: #475569;
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.technical-reference-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.45rem 0;
+}
+
+.technical-reference-meta span {
+  padding: 0.2rem 0.4rem;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.technical-notes {
+  margin: 1rem 0 0;
+  padding-left: 1.1rem;
+  color: #64748b;
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+/* ============================================= */
 /* Responsive                                    */
 /* ============================================= */
 
 @media (max-width: 700px) {
+  .technical-header {
+    flex-direction: column;
+  }
+
+  .technical-current-price {
+    width: 100%;
+    text-align: left;
+  }
+
   .scenario-cards {
     grid-template-columns: 1fr;
   }

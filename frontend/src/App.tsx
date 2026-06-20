@@ -8,31 +8,42 @@ import { ValuationSummary } from "./components/ValuationSummary";
 import { ForwardTrend } from "./components/ForwardTrend";
 import { HistoricalPE } from "./components/HistoricalPE";
 import { PeerComparison } from "./components/PeerComparison";
+import { TechnicalLevels } from "./components/TechnicalLevels";
 import {
+  fetchTechnicalLevels,
   fetchFinancialData,
   submitTextMaterial,
   runSignalExtraction,
   runValuation,
 } from "./services/api";
-import type { FinancialDataResponse, ValuationResponse } from "./types/financial";
+import type {
+  FinancialDataResponse,
+  TechnicalLevelsResponse,
+  ValuationResponse,
+} from "./types/financial";
 import "./App.css";
 
 function App() {
   const [ticker, setTicker] = useState("");
   const [data, setData] = useState<FinancialDataResponse | null>(null);
   const [valuation, setValuation] = useState<ValuationResponse | null>(null);
+  const [technicalLevels, setTechnicalLevels] = useState<TechnicalLevelsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [valuationLoading, setValuationLoading] = useState(false);
+  const [technicalLoading, setTechnicalLoading] = useState(false);
   const [textLoading, setTextLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [valuationError, setValuationError] = useState<string | null>(null);
+  const [technicalError, setTechnicalError] = useState<string | null>(null);
 
   const handleSubmit = async (t: string) => {
     setLoading(true);
     setError(null);
     setData(null);
     setValuation(null);
+    setTechnicalLevels(null);
     setValuationError(null);
+    setTechnicalError(null);
     setTicker(t);
 
     try {
@@ -60,6 +71,24 @@ function App() {
       );
     } finally {
       setValuationLoading(false);
+    }
+  };
+
+  const handleRunTechnicalLevels = async () => {
+    if (!ticker) return;
+    setTechnicalLoading(true);
+    setTechnicalError(null);
+    setTechnicalLevels(null);
+
+    try {
+      const result = await fetchTechnicalLevels(ticker);
+      setTechnicalLevels(result);
+    } catch (err) {
+      setTechnicalError(
+        err instanceof Error ? err.message : "Technical levels failed"
+      );
+    } finally {
+      setTechnicalLoading(false);
     }
   };
 
@@ -111,8 +140,8 @@ function App() {
               loading={textLoading}
             />
 
-            {/* Phase 3: Valuation trigger */}
-            <div className="valuation-trigger">
+            {/* Phase 3/4: Valuation and technical triggers */}
+            <div className="analysis-actions">
               <button
                 onClick={handleRunValuation}
                 disabled={valuationLoading}
@@ -120,8 +149,20 @@ function App() {
               >
                 {valuationLoading ? "Running Valuation..." : "Run Valuation"}
               </button>
+              <button
+                onClick={handleRunTechnicalLevels}
+                disabled={technicalLoading}
+                className="btn-secondary"
+              >
+                {technicalLoading ? "Finding Levels..." : "Find Support / Resistance"}
+              </button>
+            </div>
+            <div className="analysis-errors">
               {valuationError && (
                 <div className="error-message">{valuationError}</div>
+              )}
+              {technicalError && (
+                <div className="error-message">{technicalError}</div>
               )}
             </div>
 
@@ -143,6 +184,8 @@ function App() {
                 )}
               </div>
             )}
+
+            {technicalLevels && <TechnicalLevels levels={technicalLevels} />}
 
             {/* Financial data tables */}
             <FinancialTable

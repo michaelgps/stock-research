@@ -205,3 +205,53 @@ export interface ValuationResponse {
   signal_adjustments: Record<string, unknown>;
   data_quality: Record<string, unknown>;
 }
+
+// --- Technical levels output ---
+
+export interface TechnicalZone {
+  level_type: string;
+  price_low: number;
+  price_high: number;
+  center_price: number;
+  strength_score: number;
+  relevance_score: number;
+  strength_label: string;
+  evidence: string[];
+  invalid_if: string | null;
+  breakout_confirmation: string | null;
+  distance_to_current_pct: number | null;
+  raw_details: {
+    score_parts?: Record<string, number>;
+    kinds?: string[];
+    latest_evidence_date?: string | null;
+    details?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+}
+
+export interface TechnicalReferenceLevel {
+  reference_type: string;
+  level_type: string;
+  price: number | null;
+  price_low: number | null;
+  price_high: number | null;
+  label: string;
+  strength_label: string;
+  evidence: string[];
+  distance_to_current_pct: number | null;
+  raw_details: Record<string, unknown>;
+}
+
+export interface TechnicalLevelsResponse {
+  ticker: string;
+  current_price: number;
+  analysis_date: string;
+  lookback_days: number;
+  atr20: number;
+  atr20_pct: number;
+  support_zones: TechnicalZone[];
+  resistance_zones: TechnicalZone[];
+  active_zones: TechnicalZone[];
+  reference_levels: TechnicalReferenceLevel[];
+  notes: string[];
+}

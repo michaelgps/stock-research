@@ -1,4 +1,8 @@
-import type { FinancialDataResponse, ValuationResponse } from "../types/financial";
+import type {
+  FinancialDataResponse,
+  TechnicalLevelsResponse,
+  ValuationResponse,
+} from "../types/financial";
 
 const API_BASE = `${window.location.protocol}//${window.location.hostname}:8000`;
 
@@ -52,4 +56,10 @@ export async function runValuation(
   ticker: string
 ): Promise<ValuationResponse> {
   return apiPost(`/api/valuation/${ticker}`);
+}
+
+export async function fetchTechnicalLevels(
+  ticker: string
+): Promise<TechnicalLevelsResponse> {
+  return apiGet(`/api/technical/${ticker}`);
 }

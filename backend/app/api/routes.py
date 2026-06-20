@@ -10,6 +10,7 @@ from app.data_structure.financial import (
     TextMaterial,
 )
 from app.data_structure.signals import ExtractionResult
+from app.data_structure.technical import TechnicalLevelsResponse
 from app.data_structure.valuation import ValuationResponse
 from app.logic.data_aggregator import collect_financial_data
 from app.logic.llm_extraction.extractor import extract_signals
@@ -17,6 +18,7 @@ from app.logic.valuation import run_valuation
 from app.db.financial_store import save_user_text, get_user_texts, clear_user_texts, save_valuation_result
 from app.db.signal_store import load_cached_signals, save_signals_to_cache
 from app.repositories.company_profile_repository import set_manual_peers
+from app.services.technical_service import get_technical_levels
 
 router = APIRouter()
 
@@ -227,3 +229,18 @@ async def get_ticker_valuation(ticker: str, db: Session = Depends(get_db)):
         pass
 
     return result
+
+
+@router.get("/api/technical/{ticker}", response_model=TechnicalLevelsResponse)
+async def get_ticker_technical_levels(ticker: str, db: Session = Depends(get_db)):
+    """Return daily OHLCV support/resistance liquidity zones for a ticker."""
+    ticker = ticker.strip().upper()
+    if not ticker or len(ticker) > 10:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+
+    try:
+        return get_technical_levels(db, ticker)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Technical levels failed: {str(e)}")

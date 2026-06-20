@@ -1,6 +1,9 @@
-# Stock Research - Valuation App
+# Stock Research Engine
 
-A full-stack stock valuation tool for US equities. It collects company financials, estimates, filings, daily market prices, and optional LLM signals, then shows fiscal-year valuation windows that align forward P/E targets with rolled-forward DCF reference values.
+A full-stack stock research tool for US equities. It collects company financials, estimates, filings, daily market prices, and optional LLM signals, then supports two main workflows:
+
+1. Fiscal-year valuation using separated DCF reference values and forward P/E market multiple cases.
+2. Technical support/resistance analysis using one-year daily OHLCV volume-by-price zones plus moving-average, gap, and prior high/low references.
 
 ## What It Does
 
@@ -11,7 +14,9 @@ Enter a ticker symbol and the app:
 3. Runs a base DCF model using annual financial reports, analyst revenue estimates, FCF margins, and CAPM-style WACC.
 4. Runs a forward P/E model using fiscal-year EPS estimates, the ticker's historical P/E-to-growth relationship, and historical P/E guardrails. Historical P/E prefers FMP earnings-calendar EPS actuals as a market/adjusted EPS proxy, with split-adjusted GAAP EPS as fallback.
 5. Shows each fiscal-year valuation window as P/E case cards, with rolled-forward DCF kept as a reference note.
-6. Saves each valuation result by ticker, valuation date, and model version.
+6. Computes support/resistance zones from one year of daily price-volume history.
+7. Shows moving averages, gaps, and prior highs/lows as separate reference levels rather than mixing them into volume-confirmed support/resistance.
+8. Saves each valuation result by ticker, valuation date, and model version.
 
 ## Architecture
 
@@ -28,6 +33,7 @@ backend/                         # FastAPI (Python 3.12)
       data_aggregator.py         # Data collection facade
       data_sources/              # FMP, Finnhub, Yahoo Finance, SEC EDGAR clients
       valuation/                 # DCF, assumptions, multiples, valuation engine
+      technical/                 # Support/resistance volume-by-price logic
       llm_extraction/            # Optional LLM signal extraction
 
 frontend/                        # React + TypeScript + Vite
@@ -50,6 +56,7 @@ The current schema is built around historical persistence. Data is not overwritt
 | `tb_market_price` | Daily OHLCV market prices, primarily from Yahoo Finance via `yfinance` |
 | `tb_filing` | SEC filing text sections and user-submitted text materials |
 | `tb_valuation` | Saved valuation results by ticker, valuation date, and model version |
+| `tb_technical_level` | Saved same-day support/resistance/active technical levels by ticker, source, level type, and rank |
 | `tb_data_pull_log` | Per-day source pull status, inserted/updated counts, and errors |
 
 `tb_data_pull_log.status` uses:
@@ -70,6 +77,7 @@ The current schema is built around historical persistence. Data is not overwritt
 | Analyst estimates | FMP, Finnhub | Used for forward revenue/EPS assumptions |
 | Earnings surprises | FMP, Finnhub | Empty provider responses are logged as `empty`, not `success` |
 | Daily OHLCV | Yahoo Finance via `yfinance` | Used to reduce quota pressure on paid APIs |
+| Technical levels | Derived from `tb_market_price` | Uses stored Yahoo daily OHLCV when recent data exists |
 | SEC text | SEC EDGAR | MD&A and risk factors from 10-K |
 | Risk-free rate | FRED optional | Falls back to the model default if unavailable; macro rates are not stored in `tb_estimate` |
 
@@ -146,10 +154,17 @@ cd backend
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
 Database tables are created automatically on first startup.
+
+On Windows, if `uvicorn` is not recognized, run it through the venv Python directly:
+
+```powershell
+cd backend
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+```
 
 ### 4. Frontend
 
@@ -160,6 +175,8 @@ npm run dev
 ```
 
 Open `http://localhost:5173`.
+
+The frontend scripts use Vite's `--configLoader runner` and write TypeScript/Vite build cache to `frontend/.cache` instead of `node_modules/.tmp` or `node_modules/.vite-temp`. This avoids Windows permission errors after rebooting or reinstalling dependencies.
 
 ## API Endpoints
 
@@ -176,11 +193,18 @@ Open `http://localhost:5173`.
 | `GET` | `/api/extract-signals/{ticker}` | Read cached LLM signals |
 | `POST` | `/api/valuation/{ticker}` | Run valuation and save result |
 | `GET` | `/api/valuation/{ticker}` | Convenience valuation endpoint |
+| `GET` | `/api/technical/{ticker}` | Compute and save support/resistance technical levels |
 
 Example:
 
 ```bash
 curl -X POST http://localhost:8000/api/valuation/AAPL
+```
+
+Technical levels example:
+
+```bash
+curl http://localhost:8000/api/technical/AAPL
 ```
 
 ## Valuation Methodology
@@ -373,6 +397,260 @@ dcf_pe_separate_v2
 
 Multiple runs on the same day/model update the same row; valuations on different dates are preserved.
 
+## Technical Support / Resistance Methodology
+
+The technical-level feature is intentionally separate from valuation. It does not predict fair value and it does not say whether a stock should be bought. It answers a narrower question:
+
+```text
+Where did the stock have meaningful historical trading activity, and what nearby reference levels should a trader notice?
+```
+
+The current implementation uses only the latest one-year daily OHLCV history, approximately `252` trading days. This is a deliberate MVP choice. Multi-period profiles such as 3M / 2Y / 3Y are not active yet.
+
+### Main Output Layers
+
+The API separates two concepts that should not be mixed:
+
+| Layer | Source | Meaning |
+|---|---|---|
+| `support_zones` | Volume-confirmed price zones below current price | Areas where the stock had continuous heavy historical trading below current price |
+| `resistance_zones` | Volume-confirmed price zones above current price | Areas where the stock had continuous heavy historical trading above current price |
+| `active_zones` | Volume-confirmed price zones containing current price | Current price is inside a historical trading cluster |
+| `reference_levels` | Moving averages, gaps, prior high/low | Important context, but not volume-confirmed support/resistance by itself |
+
+The UI mirrors this split:
+
+- The `Price Map` only shows volume-confirmed support/resistance/active zones plus the current price line.
+- Moving averages, gaps, and prior high/low levels are shown below in `Reference Levels`.
+- Reference levels are not drawn as dashed lines on the map, because that made the chart visually noisy and confused them with true volume zones.
+
+### ATR In Plain English
+
+ATR means Average True Range. In this project, `ATR20` means:
+
+```text
+How many dollars this stock usually moves per day over roughly the last 20 trading days.
+```
+
+Examples:
+
+| Stock behavior | ATR meaning |
+|---|---|
+| Low-volatility stock | Smaller normal daily swing; support/resistance zones should be narrower |
+| High-volatility stock | Larger normal daily swing; zones and invalidation buffers should be wider |
+
+The model uses ATR to avoid applying one fixed dollar width to every stock. A `$3` zone may be huge for a low-priced slow stock and meaningless for a fast-moving high-volatility stock.
+
+### Volume-By-Price Construction
+
+The model builds an estimated volume-by-price profile from daily OHLCV data in `tb_market_price`.
+
+Because daily candles do not tell us the exact intraday volume at every price, this is an approximation. It should be read as estimated volume-by-price, not a true intraday volume profile.
+
+Current process:
+
+1. Load the latest `252` trading days.
+2. Split the price range into adaptive price bins.
+3. For each daily candle, distribute that day's volume across the candle's `low-high` range.
+4. The distribution is no longer uniform. More weight is placed near:
+
+```text
+Typical Price = (High + Low + Close) / 3
+```
+
+5. High and low extremes still receive some volume, but less than the middle area near typical price.
+
+This change was made because uniform distribution can overstate wick prices. For example, a stock might briefly touch a high or low with little actual volume, but uniform allocation would incorrectly treat that extreme as heavily traded.
+
+### Zone Detection
+
+After building the one-year volume profile, the model finds continuous price areas with high volume.
+
+Current thresholds:
+
+| Rule | Meaning |
+|---|---|
+| Top 20% of this ticker's own volume bins | Candidate `strong` volume area |
+| Top 40% of this ticker's own volume bins | Candidate `medium` volume area |
+| Continuous area required | Single-bin spikes are filtered out |
+| Minimum width | At least `0.5 * ATR20` or at least two bins |
+| Main display distance | Only zones within 15% of current price are shown in the main result |
+
+The top 20% / top 40% thresholds are relative to the ticker itself. The model does not use a fixed volume number such as `100M`, because each stock has a different normal trading volume.
+
+Medium zones that significantly overlap a strong zone are removed from display, so the UI does not show two versions of the same area. The current implementation treats overlap of at least `20%` of the medium zone as significant.
+
+### Strength Score
+
+Each volume-confirmed zone receives a `strength_score` from 0 to 100.
+
+Current components:
+
+| Component | Purpose |
+|---|---|
+| `volume_density` | How heavy the zone's average bin volume is compared with the ticker's highest-volume bin |
+| `zone_width` | Whether the zone is wide enough to represent an actual area rather than a narrow spike |
+| `continuity` | Rewards continuous high-volume bins |
+| `ma_confluence` | Adds a bonus when 50D or 200D moving average is inside or very near the zone |
+| `strong_tier_floor` / `medium_tier_floor` | Optional tier baseline so a top-20% or top-40% volume zone starts from the expected tier range |
+
+The score breakdown is designed to add back to the displayed `strength_score`. If a moving-average bonus would push a zone above `100`, the bonus is capped so the total remains explainable.
+
+Labels:
+
+| Score / Tier | Display |
+|---|---|
+| Strong tier or score >= 80 | `strong` |
+| Medium tier | `medium` |
+
+Important: `Active score` does not mean buy score or upside probability. It means the current price is inside a volume-confirmed zone, and the score is that zone's strength.
+
+### Moving Averages
+
+The model currently calculates:
+
+| Moving Average | Use |
+|---|---|
+| 50D MA | Reference level and possible confluence bonus |
+| 200D MA | Reference level and possible confluence bonus |
+
+Moving averages do not create strong support/resistance zones by themselves.
+
+They are used in two ways:
+
+1. If a moving average sits inside or very close to a volume-confirmed zone, that zone gets a score bonus and evidence such as `200D_MA`.
+2. The moving average is shown separately in `reference_levels` so the user can see it without confusing it with volume-confirmed support/resistance.
+
+### Gaps
+
+The model detects meaningful one-year daily gaps:
+
+| Gap Type | Reference |
+|---|---|
+| Gap up | Prior day's high to current day's low |
+| Gap down | Current day's high to prior day's low |
+
+Gap zones are references only. The model does not treat the middle of a gap as a high-volume area, because gaps are often low-volume or no-trade price vacuums. The important parts are the gap edges.
+
+For distance and sorting, a gap uses the nearest edge to the current price, not the midpoint of the gap.
+
+### Prior High / Prior Low
+
+The one-year prior high and prior low are included as reference levels only.
+
+They do not create strong support/resistance by themselves. This is intentional: prior highs/lows are useful market-memory points, but the project currently keeps them separate from volume-confirmed zones.
+
+### Integer / Round-Number Levels
+
+Round-number levels are currently not included.
+
+This is intentional based on the current product direction. They can be useful in real markets, but they also create a lot of visual noise. The current version prioritizes:
+
+1. Volume-confirmed zones.
+2. Moving-average references.
+3. Gap references.
+4. Prior high/low references.
+
+### Price Discovery / No Resistance Case
+
+If a stock is near a one-year high and there is little or no historical trading above current price, the model may return no volume-confirmed resistance.
+
+That is not automatically a bug. It means:
+
+```text
+The model does not see a nearby one-year volume-confirmed overhead supply zone.
+```
+
+In that case, the UI may still show reference levels, such as prior high or moving averages, but it should not invent a strong resistance zone.
+
+### Invalidation / Confirmation Text
+
+Each volume-confirmed zone includes simple rule text:
+
+| Zone Type | Example Meaning |
+|---|---|
+| Support | A daily close meaningfully below the zone weakens the support thesis |
+| Resistance | A daily close meaningfully above the zone weakens the resistance thesis |
+| Active | A daily close outside the active area means price has left the current trading cluster |
+
+The current invalidation buffer uses ATR:
+
+```text
+Support invalidation ~= zone_low - 0.25 * ATR20
+Resistance invalidation ~= zone_high + 0.25 * ATR20
+```
+
+Volume confirmation and multi-day retest logic are not implemented yet.
+
+### Technical API Response
+
+`GET /api/technical/{ticker}` returns:
+
+| Field | Meaning |
+|---|---|
+| `ticker` | Uppercase ticker |
+| `current_price` | Latest close from stored daily market prices |
+| `analysis_date` | Date of the latest daily price used |
+| `lookback_days` | Number of trading days used, normally up to 252 |
+| `atr20` | Approximate normal daily dollar move |
+| `atr20_pct` | `atr20 / current_price` |
+| `support_zones` | Volume-confirmed support zones below current price |
+| `resistance_zones` | Volume-confirmed resistance zones above current price |
+| `active_zones` | Volume-confirmed zones containing current price |
+| `reference_levels` | Moving averages, gaps, prior high/low references |
+| `relevance_score` | Per-zone 0-100 near-term relevance based on distance to current price; this is context, not strength |
+| `notes` | Plain-English model notes and limitations |
+
+Example response shape:
+
+```json
+{
+  "ticker": "AAPL",
+  "current_price": 298.01,
+  "analysis_date": "2026-06-20",
+  "lookback_days": 252,
+  "atr20": 7.12,
+  "support_zones": [
+    {
+      "level_type": "support",
+      "price_low": 266.0,
+      "price_high": 275.0,
+      "strength_score": 100.0,
+      "strength_label": "strong",
+      "evidence": ["volume_cluster", "top_20_volume", "continuous_volume_area", "200D_MA"]
+    }
+  ],
+  "reference_levels": [
+    {
+      "reference_type": "moving_average",
+      "level_type": "support",
+      "price": 288.63,
+      "label": "50D MA"
+    }
+  ]
+}
+```
+
+### Technical Data Persistence
+
+The API saves technical levels into `tb_technical_level`.
+
+Only volume-confirmed `support_zones`, `resistance_zones`, and `active_zones` are persisted. `reference_levels` such as moving averages, gaps, and prior high/low are recalculated and returned live, but are not stored in `tb_technical_level`.
+
+The current persistence behavior is:
+
+```text
+ticker + level_date + source + level_type + rank
+```
+
+For the same ticker/source/date, the repository deletes that day's previous technical levels and writes the fresh result. This matches the project convention that same-day repeated runs update the same result, while results from different dates are preserved.
+
+Current source:
+
+```text
+technical_v1
+```
+
 ## Testing Useful Commands
 
 Backend compile check:
@@ -395,6 +673,28 @@ Inspect PostgreSQL tables:
 docker exec stock-research-db-1 psql -U postgres -d stockapp -c "\dt"
 ```
 
+Technical endpoint smoke test:
+
+```bash
+cd backend
+venv\Scripts\python.exe -c "from fastapi.testclient import TestClient; from app.main import app; r=TestClient(app).get('/api/technical/AAPL'); print(r.status_code); print(r.json().keys())"
+```
+
+Direct technical model inspection:
+
+```bash
+cd backend
+venv\Scripts\python.exe -c "from app.config.database import SessionLocal; from app.services.technical_service import get_technical_levels; db=SessionLocal(); r=get_technical_levels(db,'AAPL'); db.close(); print([(z.price_low,z.price_high,z.strength_label,z.strength_score,z.evidence) for z in r.support_zones]); print([(x.reference_type,x.label,x.price,x.price_low,x.price_high) for x in r.reference_levels])"
+```
+
+Frontend checks:
+
+```bash
+cd frontend
+npm run build
+npm run lint
+```
+
 ## Known Limitations
 
 - The project currently uses SQLAlchemy `create_all`; production migrations should be added with Alembic before schema changes are shared broadly.
@@ -405,6 +705,12 @@ docker exec stock-research-db-1 psql -U postgres -d stockapp -c "\dt"
 - DCF currently uses analyst revenue estimates only when at least 5 annual estimates are available; otherwise it falls back to a flat scenario growth path.
 - The DCF terminal value formula is standard when `WACC > terminal_growth`; if that safety condition is violated, the code uses a rough fallback cap.
 - Final WACC should be reviewed after any signal adjustments to ensure it remains inside the intended range.
+- Technical volume-by-price currently uses daily OHLCV only. It is an approximation, not a true intraday volume profile.
+- Technical volume allocation uses a typical-price weighting method, but still cannot know the real intraday price-volume distribution without intraday bars or tick data.
+- Technical levels currently use one year only. Multi-period profiles such as 3M / 2Y / 3Y are not implemented yet.
+- Technical support/resistance does not currently use options open interest, gamma, VWAP, or analyst target clusters.
+- Technical invalidation text uses price and ATR buffers only. Relative volume confirmation, multi-day confirmation, and retest logic are not implemented yet.
+- Reference levels are intentionally separated from volume-confirmed zones. A moving average or prior high alone should not be read as a strong support/resistance zone.
 - The frontend still reflects the current MVP flow and may need UI updates for manual peer management and database inspection.
 
 ## License
