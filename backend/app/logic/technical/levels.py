@@ -56,6 +56,7 @@ def compute_technical_levels(ticker: str, daily_prices: list[dict]) -> Technical
         zone for zone in sorted(strong_zones + medium_zones, key=lambda zone: zone["low"])
         if _distance_to_zone(current_price, zone["low"], zone["high"]) / current_price <= _MAX_MAIN_DISTANCE_PCT
     ]
+    zones = _merge_nearby_zones(zones, max_gap=max(profile[0]["width"], 0.10 * atr20))
     moving_averages = _moving_average_levels(prices, current_price)
     _apply_moving_average_confluence(zones, moving_averages, atr20)
     support, resistance, active = _split_and_rank(zones, current_price)
@@ -177,6 +178,62 @@ def _zones_from_threshold(
         if zone:
             zones.append(zone)
     return zones
+
+
+def _merge_nearby_zones(zones: list[dict], max_gap: float) -> list[dict]:
+    """Merge same-side zones separated by only a small low-volume gap."""
+    if not zones:
+        return []
+
+    merged: list[dict] = []
+    for zone in sorted(zones, key=lambda item: (item["level_type"], item["low"])):
+        if not merged:
+            merged.append(zone)
+            continue
+        previous = merged[-1]
+        gap = zone["low"] - previous["high"]
+        if zone["level_type"] != previous["level_type"] or gap > max_gap:
+            merged.append(zone)
+            continue
+        merged[-1] = _combine_zones(previous, zone)
+    return sorted(merged, key=lambda item: item["low"])
+
+
+def _combine_zones(left: dict, right: dict) -> dict:
+    left_volume = left["details"].get("total_zone_volume", 0) or 0
+    right_volume = right["details"].get("total_zone_volume", 0) or 0
+    total_volume = left_volume + right_volume
+    if total_volume > 0:
+        center = (left["center"] * left_volume + right["center"] * right_volume) / total_volume
+    else:
+        center = (min(left["low"], right["low"]) + max(left["high"], right["high"])) / 2
+
+    stronger = left if left["strength_score"] >= right["strength_score"] else right
+    evidence = list(dict.fromkeys(left["evidence"] + right["evidence"] + ["merged_adjacent_zone"]))
+    dates = sorted(set(left.get("dates", [])) | set(right.get("dates", [])))
+    details = dict(stronger["details"])
+    details.update({
+        "merged_zone_count": left["details"].get("merged_zone_count", 1) + right["details"].get("merged_zone_count", 1),
+        "merged_from_ranges": [
+            *left["details"].get("merged_from_ranges", [(round(left["low"], 2), round(left["high"], 2))]),
+            *right["details"].get("merged_from_ranges", [(round(right["low"], 2), round(right["high"], 2))]),
+        ],
+        "total_zone_volume": round(total_volume, 2),
+        "bin_count": left["details"].get("bin_count", 0) + right["details"].get("bin_count", 0),
+    })
+
+    return {
+        **stronger,
+        "low": min(left["low"], right["low"]),
+        "high": max(left["high"], right["high"]),
+        "center": center,
+        "strength_score": stronger["strength_score"],
+        "strength_label": stronger["strength_label"],
+        "evidence": evidence,
+        "score_parts": dict(stronger["score_parts"]),
+        "details": details,
+        "dates": dates,
+    }
 
 
 def _zone_from_run(

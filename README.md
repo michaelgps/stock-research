@@ -523,10 +523,13 @@ Current thresholds:
 | Continuous area required | Single-bin spikes are filtered out |
 | Minimum width | At least `0.5 * ATR20` or at least two bins |
 | Main display distance | Only zones within 15% of current price are shown in the main result |
+| Nearby same-side merge | Adjacent support/resistance zones separated by only a tiny low-volume gap are merged |
 
 The top 20% / top 40% thresholds are relative to the ticker itself. The model does not use a fixed volume number such as `100M`, because each stock has a different normal trading volume.
 
 Medium zones that significantly overlap a strong zone are removed from display, so the UI does not show two versions of the same area. The current implementation treats overlap of at least `20%` of the medium zone as significant.
+
+If two same-side zones are nearly touching, such as `$395-$404` and `$405-$416`, the model treats them as one practical trading area instead of showing two visually confusing boxes.
 
 ### Strength Score
 
