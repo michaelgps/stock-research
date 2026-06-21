@@ -302,7 +302,7 @@ def _fmp_forward_estimates(estimates: list[AnalystEstimateData] | None) -> list[
         if (
             estimate.eps_estimate is not None
             and estimate.eps_estimate > 0
-            and estimate.source == "fmp"
+            and estimate.source in {"fmp", "yfinance"}
             and estimate.period
             and str(estimate.period).isdigit()
         )

@@ -74,7 +74,7 @@ The current schema is built around historical persistence. Data is not overwritt
 | Company identity | SEC EDGAR | Primary identity and CIK lookup |
 | Company profile | FMP, Finnhub | FMP is preferred for market cap/current price when available |
 | Financial reports | SEC EDGAR, FMP fallback | SEC annual statements are preferred |
-| Analyst estimates | FMP, Finnhub | Used for forward revenue/EPS assumptions |
+| Analyst estimates | FMP, Finnhub, Yahoo fallback | FMP annual EPS is preferred; Yahoo current/next FY EPS can backfill near-term forward P/E when FMP is unavailable under the current plan |
 | Earnings surprises | FMP, Finnhub | Empty provider responses are logged as `empty`, not `success` |
 | Daily OHLCV | Yahoo Finance via `yfinance` | Used to reduce quota pressure on paid APIs |
 | Technical levels | Derived from `tb_market_price` | Uses stored Yahoo daily OHLCV when recent data exists |
@@ -341,8 +341,10 @@ Forward EPS is cross-checked against other sources when available:
 | Source | Coverage Used | Role |
 |---|---|---|
 | FMP | First 3 annual forward EPS estimates | Primary valuation input |
-| Yahoo Finance | Current FY and next FY EPS | Free cross-check for near-term consensus |
+| Yahoo Finance | Current FY and next FY EPS | Free cross-check and near-term fallback if FMP forward EPS is unavailable |
 | Alpha Vantage | Up to first 3 annual EPS estimates, if `ALPHA_VANTAGE_API_KEY` is configured | Optional second-source sanity check |
+
+If FMP returns an entitlement error such as `402 Payment Required` for analyst estimates, the model does not treat this as a rate-limit event. It records the provider-access issue in `data_quality`. When Yahoo Finance has usable current-FY consensus EPS, the backend builds a fallback fiscal-year estimate, marks `forward_eps_source` as `yfinance_fallback_current_fy_consensus`, and still produces near-term P/E valuation windows. If neither FMP nor Yahoo provides usable forward EPS, the UI shows a clear "Forward P/E valuation unavailable" message instead of rendering empty valuation cards.
 
 If FMP's fourth or fifth forward year shows an unusual pattern, such as EPS falling while revenue keeps rising, that year does not affect the P/E multiple because it is outside the primary three-year window.
 
@@ -396,7 +398,7 @@ Because Yahoo prices are split-adjusted, fallback GAAP EPS is also adjusted to t
 
 Split adjustment is inferred conservatively from large diluted-share jumps using common split ratios. This handles major stock splits without calling another paid endpoint, but a dedicated corporate-actions feed would still be preferable for production-grade coverage.
 
-Forward EPS uses the next fiscal year annual EPS estimate from FMP analyst estimates. It is not NTM EPS. The response exposes the EPS basis, fiscal year label, inferred fiscal year end date when available, source, and as-of date.
+Forward EPS uses the next fiscal year annual EPS estimate from FMP analyst estimates when available. It is not NTM EPS. If FMP has no usable forward EPS for the ticker under the active data plan, Yahoo Finance current-FY consensus EPS may be used as a clearly labeled fallback. The response exposes the EPS basis, fiscal year label, inferred fiscal year end date when available, source, and as-of date.
 
 Forward P/E range formula:
 

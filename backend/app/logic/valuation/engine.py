@@ -56,7 +56,8 @@ async def run_valuation(
     shares = _get_shares(data)
     current_price = data.company.current_price or 0
     forward_eps_estimate = _get_forward_eps_estimate(data)
-    forward_eps = forward_eps_estimate.eps_estimate if forward_eps_estimate else get_forward_eps(data.analyst_estimates)
+    valuation_analyst_estimates = list(data.analyst_estimates)
+    forward_eps = forward_eps_estimate.eps_estimate if forward_eps_estimate else get_forward_eps(valuation_analyst_estimates)
 
     if latest_revenue <= 0:
         raise ValueError("Cannot run valuation: no revenue data available")
@@ -83,29 +84,7 @@ async def run_valuation(
     else:
         data_quality["pe_range_years"] = "not_available"
 
-    # --- Forward EPS growth (anchored on actual EPS, 2-year CAGR) ---
     actual_eps, fy_end_date = _get_latest_actual_eps(data)
-    fwd_eps_growth = get_forward_eps_growth(
-        data.analyst_estimates,
-        actual_eps=actual_eps,
-        fy_end_date=fy_end_date,
-    )
-    if fwd_eps_growth is not None:
-        data_quality["forward_eps_growth"] = f"{round(fwd_eps_growth * 100, 1)}%"
-        if actual_eps is not None:
-            data_quality["actual_eps_anchor"] = round(actual_eps, 2)
-            data_quality["fy_end_date"] = fy_end_date
-    else:
-        data_quality["forward_eps_growth"] = "not_available"
-
-    # Record forward EPS
-    if forward_eps is not None:
-        data_quality["forward_eps"] = round(forward_eps, 2)
-        data_quality["forward_eps_basis"] = "next_fiscal_year"
-        data_quality["forward_eps_period"] = forward_eps_estimate.period if forward_eps_estimate else "unknown"
-        data_quality["forward_eps_source"] = "fmp_annual_analyst_estimates"
-    else:
-        data_quality["forward_eps"] = "not_available"
 
     # Denominator mismatch note
     data_quality["pe_denominator_note"] = (
@@ -179,6 +158,20 @@ async def run_valuation(
                 )
 
         data_quality["yf_cross_validation"] = yf_validation
+        fallback_estimates = _build_yfinance_forward_eps_estimates(data, yf_validation)
+        if forward_eps is None and fallback_estimates:
+            valuation_analyst_estimates.extend(fallback_estimates)
+            forward_eps_estimate = fallback_estimates[0]
+            forward_eps = forward_eps_estimate.eps_estimate
+            data_quality["forward_eps_fallback_warning"] = (
+                "FMP annual analyst EPS is unavailable for this ticker under the current data plan; "
+                "Yahoo Finance current-FY consensus EPS is used as a fallback."
+            )
+        elif forward_eps is None:
+            unavailable_reason = _forward_eps_unavailable_reason(db, data.company.ticker)
+            if unavailable_reason:
+                data_quality["forward_eps_unavailable_reason"] = unavailable_reason
+
         if yf_validation.get("warning"):
             logger.warning(
                 "%s EPS divergence: FMP=%.2f vs YF=%.2f (%.1f%%)",
@@ -266,8 +259,37 @@ async def run_valuation(
 
     data_quality["forward_eps_validation_policy"] = (
         "Primary valuation uses only the first 3 forward fiscal-year EPS estimates. "
-        "Yahoo and optional Alpha Vantage are cross-checks to catch obvious FMP estimate errors."
+        "FMP is preferred; Yahoo Finance may be used as a fallback when FMP forward EPS is unavailable. "
+        "Optional Alpha Vantage is a cross-check to catch obvious estimate errors."
     )
+
+    valuation_data = _with_analyst_estimates(data, valuation_analyst_estimates)
+
+    # --- Forward EPS growth (anchored on actual EPS, 2-year CAGR) ---
+    fwd_eps_growth = get_forward_eps_growth(
+        valuation_data.analyst_estimates,
+        actual_eps=actual_eps,
+        fy_end_date=fy_end_date,
+    )
+    if fwd_eps_growth is not None:
+        data_quality["forward_eps_growth"] = f"{round(fwd_eps_growth * 100, 1)}%"
+        if actual_eps is not None:
+            data_quality["actual_eps_anchor"] = round(actual_eps, 2)
+            data_quality["fy_end_date"] = fy_end_date
+    else:
+        data_quality["forward_eps_growth"] = "not_available"
+
+    # Record forward EPS
+    if forward_eps is not None:
+        data_quality["forward_eps"] = round(forward_eps, 2)
+        data_quality["forward_eps_basis"] = "next_fiscal_year"
+        data_quality["forward_eps_period"] = forward_eps_estimate.period if forward_eps_estimate else "unknown"
+        data_quality["forward_eps_source"] = _forward_eps_source_label(forward_eps_estimate)
+    else:
+        data_quality["forward_eps"] = "not_available"
+        unavailable_reason = _forward_eps_unavailable_reason(db, data.company.ticker)
+        if unavailable_reason:
+            data_quality["forward_eps_unavailable_reason"] = unavailable_reason
 
     # --- Fetch peer forward P/E (with growth adjustment) ---
     peer_pe_data = await fetch_peer_pe(
@@ -311,7 +333,7 @@ async def run_valuation(
             assumptions, latest_revenue, net_debt, shares, analyst_revenues=analyst_revenues or None
         )
         mult_result = run_multiples(
-            data, label, forward_eps,
+            valuation_data, label, forward_eps,
             yearly_pe_ranges=yearly_pe_ranges,
             peer_pe_data=peer_pe_data,
             target_period=forward_eps_estimate.period if forward_eps_estimate else None,
@@ -331,7 +353,7 @@ async def run_valuation(
 
     # --- 5-year forward trend (using period-specific base P/E multiples) ---
     pe_case_details_by_period = _build_pe_case_details_by_period(
-        data=data,
+        data=valuation_data,
         yearly_pe_ranges=yearly_pe_ranges,
         current_price=current_price,
         latest_fiscal_year_end=fy_end_date,
@@ -343,7 +365,7 @@ async def run_valuation(
         if cases
     }
     trend_raw = compute_forward_trend(
-        data.analyst_estimates,
+        valuation_data.analyst_estimates,
         base_pe_mult or 20,
         pe_by_period=base_pe_by_period,
     )
@@ -471,6 +493,99 @@ def _get_forward_eps_estimate(data: FinancialDataResponse) -> AnalystEstimateDat
     return estimates[0] if estimates else None
 
 
+def _with_analyst_estimates(
+    data: FinancialDataResponse,
+    estimates: list[AnalystEstimateData],
+) -> FinancialDataResponse:
+    """Return a shallow copy with valuation-specific estimate fallbacks included."""
+    if hasattr(data, "model_copy"):
+        return data.model_copy(update={"analyst_estimates": estimates})
+    return data.copy(update={"analyst_estimates": estimates})
+
+
+def _build_yfinance_forward_eps_estimates(
+    data: FinancialDataResponse,
+    yf_validation: dict | None,
+) -> list[AnalystEstimateData]:
+    """Convert Yahoo EPS validation output into explicit fiscal-year estimates."""
+    if not isinstance(yf_validation, dict):
+        return []
+
+    current_fy = _infer_current_forward_fiscal_year(data)
+    if current_fy is None:
+        return []
+
+    estimates: list[AnalystEstimateData] = []
+    current_eps = _positive_number(yf_validation.get("yf_current_fy_eps"))
+    next_eps = _positive_number(yf_validation.get("yf_next_fy_eps"))
+
+    if current_eps is not None:
+        estimates.append(AnalystEstimateData(
+            period=str(current_fy),
+            eps_estimate=current_eps,
+            source="yfinance",
+        ))
+    if next_eps is not None:
+        estimates.append(AnalystEstimateData(
+            period=str(current_fy + 1),
+            eps_estimate=next_eps,
+            source="yfinance",
+        ))
+    return estimates
+
+
+def _infer_current_forward_fiscal_year(data: FinancialDataResponse) -> int | None:
+    """Infer the current forward fiscal year when Yahoo labels estimates as 0y/+1y."""
+    latest_reported_fy = max(
+        (row.fiscal_year for row in data.annual_statements if row.fiscal_year),
+        default=None,
+    )
+    today_year = dt_date.today().year
+    if latest_reported_fy is None:
+        return today_year
+    return max(today_year, latest_reported_fy + 1)
+
+
+def _positive_number(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _forward_eps_source_label(estimate: AnalystEstimateData | None) -> str:
+    if estimate and estimate.source == "yfinance":
+        return "yfinance_fallback_current_fy_consensus"
+    if estimate and estimate.source == "fmp":
+        return "fmp_annual_analyst_estimates"
+    return "unknown"
+
+
+def _forward_eps_unavailable_reason(db, ticker: str) -> str | None:
+    if db is None:
+        return None
+    try:
+        from app.db.financial import DataPullLog
+        from app.repositories import data_pull_log_repository
+
+        today = data_pull_log_repository.today_str()
+        row = db.query(DataPullLog).filter(
+            DataPullLog.ticker == ticker,
+            DataPullLog.data_type == "estimate",
+            DataPullLog.source == "fmp",
+            DataPullLog.pull_date == today,
+        ).order_by(DataPullLog.id.desc()).first()
+        message = row.error_message if row else None
+        if message and ("402" in message or "Payment Required" in message):
+            return "FMP analyst estimates are unavailable for this ticker under the current subscription (402 Payment Required)."
+        if row and row.status in {"empty", "failed"}:
+            return f"FMP analyst estimates unavailable: {row.status}."
+    except Exception as exc:
+        logger.debug("Could not read forward EPS pull log for %s: %s", ticker, exc)
+    return None
+
+
 def _build_forward_eps_metadata(
     estimate: AnalystEstimateData | None,
     latest_fiscal_year_end: str | None,
@@ -488,7 +603,7 @@ def _build_forward_eps_metadata(
         fiscal_year=fiscal_year,
         fiscal_year_end=fiscal_year_end,
         eps=round(estimate.eps_estimate, 2),
-        source="fmp_annual_analyst_estimates",
+        source=_forward_eps_source_label(estimate),
         as_of_date=data_pull_log_repository.today_str(),
     )
 
@@ -589,7 +704,7 @@ def _build_pe_case_details_by_period(
             and str(estimate.period).isdigit()
             and estimate.eps_estimate is not None
             and estimate.eps_estimate > 0
-            and estimate.source == "fmp"
+            and estimate.source in {"fmp", "yfinance"}
         )
     }, key=int)[:_MAX_FORWARD_VALUATION_YEARS]
     eps_by_period = {

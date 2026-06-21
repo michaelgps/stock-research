@@ -370,6 +370,34 @@ tr:hover {
   margin-bottom: 1rem;
 }
 
+.valuation-empty-state {
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+  border: 1px solid #fed7aa;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #fff7ed 0%, #fffbeb 100%);
+  color: #7c2d12;
+}
+
+.valuation-empty-state h4 {
+  margin: 0 0 0.5rem;
+  color: #431407;
+  font-size: 1.05rem;
+}
+
+.valuation-empty-state p {
+  margin: 0.45rem 0;
+}
+
+.valuation-empty-reason {
+  padding: 0.7rem 0.85rem;
+  margin: 0.8rem 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #9a3412;
+  font-weight: 700;
+}
+
 .valuation-view-card {
   padding: 1rem;
   border: 1px solid #e5e7eb;

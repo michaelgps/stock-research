@@ -22,6 +22,14 @@ function multiple(value: number | null | undefined): string {
   return value == null ? "N/A" : `${value.toFixed(1)}x`;
 }
 
+function qualityText(value: unknown): string {
+  if (value == null) return "N/A";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value);
+}
+
 function verdictClass(verdict: string | null): string {
   if (verdict === "undervalued") return "upside";
   if (verdict === "overvalued") return "downside";
@@ -151,7 +159,7 @@ function ValuationWindow({ title, fyWindow, badgeClass, currentPrice }: Valuatio
 }
 
 export function ValuationSummary({ valuation }: ValuationSummaryProps) {
-  const { current_price, fiscal_year_valuation_windows } = valuation;
+  const { current_price, fiscal_year_valuation_windows, data_quality } = valuation;
   const valuationWindowCards: ValuationWindowCard[] = [
     {
       title: "Forward P/E Market Multiple",
@@ -164,6 +172,11 @@ export function ValuationSummary({ valuation }: ValuationSummaryProps) {
       badgeClass: "secondary-time-badge",
     },
   ];
+  const hasValuationWindows = fiscal_year_valuation_windows.length > 0;
+  const forwardEpsReason =
+    data_quality.forward_eps_fallback_warning ??
+    data_quality.forward_eps_unavailable_reason ??
+    data_quality.forward_eps;
 
   return (
     <div className="valuation-summary">
@@ -173,11 +186,30 @@ export function ValuationSummary({ valuation }: ValuationSummaryProps) {
         Forward P/E is shown by fiscal-year valuation period. The model now generates automatic P/E ranges instead of one hard-coded multiple.
       </div>
 
-      <div className="valuation-window-stack">
-        {valuationWindowCards.map((card) => (
-          <ValuationWindow key={card.title} {...card} currentPrice={current_price} />
-        ))}
-      </div>
+      {hasValuationWindows ? (
+        <div className="valuation-window-stack">
+          {valuationWindowCards
+            .filter((card) => card.fyWindow)
+            .map((card) => (
+              <ValuationWindow key={card.title} {...card} currentPrice={current_price} />
+            ))}
+        </div>
+      ) : (
+        <div className="valuation-empty-state">
+          <h4>Forward P/E valuation unavailable</h4>
+          <p>
+            The model could not build a fiscal-year P/E valuation window because no usable forward EPS estimate was available.
+          </p>
+          {forwardEpsReason != null && (
+            <div className="valuation-empty-reason">
+              {qualityText(forwardEpsReason)}
+            </div>
+          )}
+          <p className="dcf-reference-note">
+            DCF still runs as a reference, but for cyclical or negative-FCF companies it may be less useful than a clean forward EPS data source.
+          </p>
+        </div>
+      )}
 
       {Object.keys(valuation.data_quality).length > 0 && (
         <details className="data-quality">
@@ -186,7 +218,7 @@ export function ValuationSummary({ valuation }: ValuationSummaryProps) {
             {Object.entries(valuation.data_quality).map(([key, value]) => (
               <div key={key} className="quality-item">
                 <span className="quality-key">{key.replace(/_/g, " ")}</span>
-                <span className="quality-value">{String(value)}</span>
+                <span className="quality-value">{qualityText(value)}</span>
               </div>
             ))}
           </div>
