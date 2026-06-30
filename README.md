@@ -74,7 +74,7 @@ The current schema is built around historical persistence. Data is not overwritt
 | Company identity | SEC EDGAR | Primary identity and CIK lookup |
 | Company profile | FMP, Finnhub | FMP is preferred for market cap/current price when available |
 | Financial reports | SEC EDGAR, FMP fallback | SEC annual statements are preferred |
-| Analyst estimates | FMP, Finnhub, Yahoo fallback | FMP annual EPS is preferred; Yahoo current/next FY EPS can backfill near-term forward P/E when FMP is unavailable under the current plan |
+| Analyst estimates | FMP, Finnhub, Alpha Vantage, Yahoo fallback | FMP annual EPS is preferred; Alpha Vantage `EARNINGS_ESTIMATES` can backfill annual EPS estimates when configured; Yahoo current/next FY EPS is the final near-term fallback |
 | Earnings surprises | FMP, Finnhub | Empty provider responses are logged as `empty`, not `success` |
 | Daily OHLCV | Yahoo Finance via `yfinance` | Used to reduce quota pressure on paid APIs |
 | Technical levels | Derived from `tb_market_price` | Uses stored Yahoo daily OHLCV when recent data exists |
@@ -316,6 +316,8 @@ The model now builds an automatic P/E range rather than a single P/E multiple. I
 
 The `forward_trend` field may still show additional provider years when available. That trend is display/context only; the automatic P/E cases use the first three forward fiscal years.
 
+The 5-Year Forward Valuation section keeps every forward EPS year returned by the active provider. If a provider returns five years, the UI still shows five years. Years that are not matched by another source within a 5% tolerance are marked `unverified` because longer-dated EPS estimates often lack cross-source validation. Near-term years with matching Alpha Vantage/Yahoo/FMP values are marked `cross-checked`.
+
 For each valuation fiscal year, the model uses the target year's own growth when a prior-year EPS estimate is available, then blends in the following year's growth:
 
 ```text
@@ -341,10 +343,21 @@ Forward EPS is cross-checked against other sources when available:
 | Source | Coverage Used | Role |
 |---|---|---|
 | FMP | First 3 annual forward EPS estimates | Primary valuation input |
-| Yahoo Finance | Current FY and next FY EPS | Free cross-check and near-term fallback if FMP forward EPS is unavailable |
-| Alpha Vantage | Up to first 3 annual EPS estimates, if `ALPHA_VANTAGE_API_KEY` is configured | Optional second-source sanity check |
+| Alpha Vantage | `EARNINGS_ESTIMATES`, up to first 3 annual EPS estimates, if `ALPHA_VANTAGE_API_KEY` is configured | First fallback and second-source sanity check |
+| Yahoo Finance | Current FY and next FY EPS | Final free near-term fallback if FMP and Alpha Vantage are unavailable |
 
-If FMP returns an entitlement error such as `402 Payment Required` for analyst estimates, the model does not treat this as a rate-limit event. It records the provider-access issue in `data_quality`. When Yahoo Finance has usable current-FY consensus EPS, the backend builds a fallback fiscal-year estimate, marks `forward_eps_source` as `yfinance_fallback_current_fy_consensus`, and still produces near-term P/E valuation windows. If neither FMP nor Yahoo provides usable forward EPS, the UI shows a clear "Forward P/E valuation unavailable" message instead of rendering empty valuation cards.
+If FMP returns an entitlement error such as `402 Payment Required` for analyst estimates, the model does not treat this as a rate-limit event. It records the provider-access issue in `data_quality`. When Alpha Vantage is configured and has usable annual EPS estimates, the backend marks `forward_eps_source` as `alpha_vantage_annual_eps_estimates_fallback` and still produces fiscal-year P/E valuation windows. If Alpha Vantage is unavailable but Yahoo Finance has usable current-FY consensus EPS, the backend marks `forward_eps_source` as `yfinance_fallback_current_fy_consensus`. If none of these sources provides usable forward EPS, the UI shows a clear "Forward P/E valuation unavailable" message instead of rendering empty valuation cards.
+
+Fallback order is intentionally one-way:
+
+```text
+FMP annual analyst EPS
+-> Alpha Vantage annual EPS estimates
+-> Yahoo Finance current/next FY consensus EPS
+-> no forward P/E valuation window
+```
+
+Alpha Vantage is optional. If `ALPHA_VANTAGE_API_KEY` is missing or still set to the placeholder value, the backend skips Alpha Vantage and records the reason in `alpha_vantage_eps_validation`. Alpha Vantage responses are cached daily in `tb_estimate` with `source = "alpha_vantage"` and `estimate_period = "eps_validation"` so repeated same-day valuations do not spend extra Alpha Vantage calls.
 
 If FMP's fourth or fifth forward year shows an unusual pattern, such as EPS falling while revenue keeps rising, that year does not affect the P/E multiple because it is outside the primary three-year window.
 
@@ -376,6 +389,39 @@ The initial range is then adjusted automatically:
 
 The API echoes uncertainty trigger reasons in each `pe_cases[].uncertainty_reasons` list so the UI can explain why a range was reduced.
 
+### Cyclicality and Peak-Earnings Guardrail
+
+High near-term EPS growth does not automatically justify a high P/E multiple. The model now adds a cyclicality layer before finalizing the automatic P/E range. This is designed for companies whose earnings can spike near the top of a cycle, especially memory, commodity, auto, energy, shipping, airlines, banks, and other highly cyclical businesses.
+
+The model estimates:
+
+| Signal | Meaning |
+|---|---|
+| `cyclicality_score` | How cyclical the company appears, based on industry tags plus historical gross margin, FCF margin, and EPS volatility |
+| `peak_earnings_risk` | Whether forward EPS may be peak-cycle EPS rather than normalized earning power |
+| `structural_re_rating_score` | How much confidence the model has that higher growth deserves a genuine valuation re-rating |
+
+The simplified logic is:
+
+```text
+Growth-implied P/E = P/E range from weighted forward EPS growth
+Historical prior = recent/historical P/E median range
+Structural score = confidence that growth is durable rather than cyclical
+Peak risk = penalty for applying high multiples to potentially peak EPS
+
+Final P/E range moves toward historical/normalized P/E when cyclicality and peak risk are high.
+```
+
+This is intentionally asymmetric:
+
+| Company type | Model behavior |
+|---|---|
+| Low cyclicality compounder | Growth-implied P/E can remain the main driver |
+| Mixed semiconductor / cyclical growth | Growth-implied P/E is blended back toward historical P/E and penalized for peak-risk |
+| Memory / commodity cyclical | The model strongly avoids `peak forward EPS * high-growth P/E` |
+
+For example, MU is treated as a memory/storage cycle stock even when the provider industry field only says "Semiconductors." Its high FY1/FY2 EPS growth can still produce a higher case, but the P/E range is pulled back toward normalized/historical levels unless the company proves structural re-rating through durable FY3-FY5 growth, margin stability, and better cycle resistance.
+
 If a company has very high weighted growth but also clear growth deceleration, the model can output two automatic cases:
 
 | Case | Meaning |
@@ -398,7 +444,26 @@ Because Yahoo prices are split-adjusted, fallback GAAP EPS is also adjusted to t
 
 Split adjustment is inferred conservatively from large diluted-share jumps using common split ratios. This handles major stock splits without calling another paid endpoint, but a dedicated corporate-actions feed would still be preferable for production-grade coverage.
 
-Forward EPS uses the next fiscal year annual EPS estimate from FMP analyst estimates when available. It is not NTM EPS. If FMP has no usable forward EPS for the ticker under the active data plan, Yahoo Finance current-FY consensus EPS may be used as a clearly labeled fallback. The response exposes the EPS basis, fiscal year label, inferred fiscal year end date when available, source, and as-of date.
+Forward EPS uses the next fiscal year annual EPS estimate from FMP analyst estimates when available. It is not NTM EPS. If FMP has no usable forward EPS for the ticker under the active data plan, Alpha Vantage annual EPS estimates may be used as the first clearly labeled fallback, followed by Yahoo Finance current-FY consensus EPS as the final fallback. The response exposes the EPS basis, fiscal year label, inferred fiscal year end date when available, source, and as-of date.
+
+The most useful data-quality fields for debugging EPS source selection are:
+
+| Field | Meaning |
+|---|---|
+| `forward_eps_source` | Which provider supplied the EPS used in the P/E valuation window |
+| `forward_eps_fallback_warning` | Explanation when the model had to fall back from FMP |
+| `alpha_vantage_eps_validation` | Alpha Vantage configuration status, matched periods, and parsed annual EPS estimates |
+| `yf_cross_validation` | Yahoo current/next FY EPS values used as cross-check or final fallback |
+| `forward_eps_unavailable_reason` | Provider-access or missing-data reason when no forward EPS can be used |
+
+Each `forward_trend[]` item also includes:
+
+| Field | Meaning |
+|---|---|
+| `source` | Provider that supplied that year's EPS estimate |
+| `eps_validation_status` | `cross_checked` when another source agrees within tolerance, otherwise `unverified` |
+| `eps_validation_sources` | Sources involved in the validation check |
+| `eps_validation_note` | Human-readable validation note for the UI |
 
 Forward P/E range formula:
 
@@ -423,7 +488,7 @@ DCF and forward P/E are not averaged into a blended target. The primary valuatio
 | Field | Meaning |
 |---|---|
 | `fiscal_year_valuation_windows` | Per-fiscal-year windows containing time distance, EPS, automatic P/E case cards, and DCF reference values |
-| `pe_cases` | Automatic P/E range cases inside each fiscal-year window, including P/E low/mid/high, value low/mid/high, weighted EPS growth, growth curve, adjustment details, and uncertainty trigger reasons |
+| `pe_cases` | Automatic P/E range cases inside each fiscal-year window, including P/E low/mid/high, value low/mid/high, weighted EPS growth, growth curve, adjustment details, cyclicality/peak-risk fields, and uncertainty trigger reasons |
 | `dcf_view` | Legacy/base DCF present-value reference |
 | `pe_view` | Legacy next-fiscal-year P/E view |
 | `forward_eps_metadata` | Explicit forward EPS basis, fiscal year period, fiscal year end, source, and as-of date |
@@ -455,7 +520,14 @@ The technical-level feature is intentionally separate from valuation. It does no
 Where did the stock have meaningful historical trading activity, and what nearby reference levels should a trader notice?
 ```
 
-The current implementation uses only the latest one-year daily OHLCV history, approximately `252` trading days. This is a deliberate MVP choice. Multi-period profiles such as 3M / 2Y / 3Y are not active yet.
+The primary support/resistance map uses only the latest one-year daily OHLCV history, approximately `252` trading days. The API also returns a separate longer-term volume reference layer using up to `756` trading days, roughly three years, when enough local price history exists.
+
+The two layers are intentionally not mixed:
+
+| Layer | Lookback | Purpose |
+|---|---:|---|
+| Primary support/resistance | ~1Y / 252 trading days | Current market structure and main price map |
+| Longer-term volume references | Up to ~3Y / 756 trading days | Older high-volume memory zones for context only |
 
 ### Main Output Layers
 
@@ -466,12 +538,14 @@ The API separates two concepts that should not be mixed:
 | `support_zones` | Volume-confirmed price zones below current price | Areas where the stock had continuous heavy historical trading below current price |
 | `resistance_zones` | Volume-confirmed price zones above current price | Areas where the stock had continuous heavy historical trading above current price |
 | `active_zones` | Volume-confirmed price zones containing current price | Current price is inside a historical trading cluster |
-| `reference_levels` | Moving averages, gaps, prior high/low | Important context, but not volume-confirmed support/resistance by itself |
+| `long_term_zones` | Up to 3Y volume-confirmed historical zones | Older volume-memory areas shown separately as references |
+| `reference_levels` | Moving averages, gaps, Fibonacci retracements, prior high/low | Important context, but not volume-confirmed support/resistance by itself |
 
 The UI mirrors this split:
 
-- The `Price Map` only shows volume-confirmed support/resistance/active zones plus the current price line.
-- Moving averages, gaps, and prior high/low levels are shown below in `Reference Levels`.
+- The `Price Map` only shows primary 1Y volume-confirmed support/resistance/active zones plus the current price line.
+- Longer-term 3Y zones are shown in their own section and are not drawn into the primary map.
+- Moving averages, gaps, Fibonacci retracements, and prior high/low levels are shown below in `Reference Levels`.
 - Reference levels are not drawn as dashed lines on the map, because that made the chart visually noisy and confused them with true volume zones.
 
 ### ATR In Plain English
@@ -524,7 +598,7 @@ Current thresholds:
 | Top 40% of this ticker's own volume bins | Candidate `medium` volume area |
 | Continuous area required | Single-bin spikes are filtered out |
 | Minimum width | At least `0.5 * ATR20` or at least two bins |
-| Main display distance | Only zones within 15% of current price are shown in the main result |
+| Main display distance | Only zones within 30% of current price are shown in the main result |
 | Nearby same-side merge | Adjacent support/resistance zones separated by only a tiny low-volume gap are merged |
 
 The top 20% / top 40% thresholds are relative to the ticker itself. The model does not use a fixed volume number such as `100M`, because each stock has a different normal trading volume.
@@ -532,6 +606,29 @@ The top 20% / top 40% thresholds are relative to the ticker itself. The model do
 Medium zones that significantly overlap a strong zone are removed from display, so the UI does not show two versions of the same area. The current implementation treats overlap of at least `20%` of the medium zone as significant.
 
 If two same-side zones are nearly touching, such as `$395-$404` and `$405-$416`, the model treats them as one practical trading area instead of showing two visually confusing boxes.
+
+### Longer-Term Volume References
+
+Some stocks may show no qualified support or resistance in the latest one-year profile, especially after a large move or a sharp drawdown. That does not always mean there is no older market memory.
+
+To handle this without polluting the main chart, the API also calculates a longer-term volume profile:
+
+| Rule | Current behavior |
+|---|---|
+| Lookback | Up to `756` trading days, roughly 3 years |
+| Minimum data required | At least `504` trading days |
+| Display role | Reference only |
+| Main chart role | Not drawn into the primary `Price Map` |
+| Persistence | Not persisted into `tb_technical_level` |
+
+Example interpretation:
+
+```text
+MSFT may have no 1Y volume-confirmed support below current price,
+but a 3Y reference may show an older high-volume area around $320-$332.
+```
+
+That older area is useful context, but it should not be treated the same as a fresh 1Y support zone.
 
 ### Strength Score
 
@@ -602,7 +699,29 @@ This is intentional based on the current product direction. They can be useful i
 1. Volume-confirmed zones.
 2. Moving-average references.
 3. Gap references.
-4. Prior high/low references.
+4. Fibonacci retracement references.
+5. Prior high/low references.
+
+### Fibonacci Retracements
+
+Fibonacci retracements are included as reference levels only, similar to moving averages.
+
+The model does not treat Fibonacci prices as volume-confirmed support or resistance by themselves. They are context points that may matter more when they line up with:
+
+1. A volume-confirmed zone.
+2. A moving average.
+3. A gap edge.
+4. A prior high or prior low.
+
+Current process:
+
+1. Use the latest one-year price history.
+2. Find the dominant one-year swing high and swing low.
+3. If the low happened before the high, treat it as an uptrend swing and calculate pullback references below the high.
+4. If the high happened before the low, treat it as a downtrend swing and calculate rebound references above the low.
+5. Return the common `38.2%`, `50.0%`, `61.8%`, and `78.6%` retracement prices, filtered to the same 30% nearby window as other references.
+
+Important limitation: this is a simple one-year swing calculation. It is not yet doing advanced swing-point detection, Elliott-wave analysis, or multi-timeframe Fibonacci clustering.
 
 ### Price Discovery / No Resistance Case
 
@@ -650,7 +769,8 @@ Volume confirmation and multi-day retest logic are not implemented yet.
 | `support_zones` | Volume-confirmed support zones below current price |
 | `resistance_zones` | Volume-confirmed resistance zones above current price |
 | `active_zones` | Volume-confirmed zones containing current price |
-| `reference_levels` | Moving averages, gaps, prior high/low references |
+| `long_term_zones` | Up to 3Y volume-confirmed historical zones shown as reference context only |
+| `reference_levels` | Moving averages, gaps, Fibonacci retracements, prior high/low references |
 | `relevance_score` | Per-zone 0-100 near-term relevance based on distance to current price; this is context, not strength |
 | `notes` | Plain-English model notes and limitations |
 
@@ -688,7 +808,9 @@ Example response shape:
 
 The API saves technical levels into `tb_technical_level`.
 
-Only volume-confirmed `support_zones`, `resistance_zones`, and `active_zones` are persisted. `reference_levels` such as moving averages, gaps, and prior high/low are recalculated and returned live, but are not stored in `tb_technical_level`.
+Only volume-confirmed `support_zones`, `resistance_zones`, and `active_zones` are persisted. `reference_levels` such as moving averages, gaps, Fibonacci retracements, and prior high/low are recalculated and returned live, but are not stored in `tb_technical_level`.
+
+`long_term_zones` are also recalculated live and are not persisted. The database table stores only the primary 1Y support/resistance/active output.
 
 The current persistence behavior is:
 
@@ -737,7 +859,7 @@ Direct technical model inspection:
 
 ```bash
 cd backend
-venv\Scripts\python.exe -c "from app.config.database import SessionLocal; from app.services.technical_service import get_technical_levels; db=SessionLocal(); r=get_technical_levels(db,'AAPL'); db.close(); print([(z.price_low,z.price_high,z.strength_label,z.strength_score,z.evidence) for z in r.support_zones]); print([(x.reference_type,x.label,x.price,x.price_low,x.price_high) for x in r.reference_levels])"
+venv\Scripts\python.exe -c "from app.config.database import SessionLocal; from app.services.technical_service import get_technical_levels; db=SessionLocal(); r=get_technical_levels(db,'AAPL'); db.close(); print('support', [(z.price_low,z.price_high,z.strength_label,z.strength_score,z.evidence) for z in r.support_zones]); print('long_term', [(z.level_type,z.price_low,z.price_high,z.strength_label,z.strength_score) for z in r.long_term_zones]); print('refs', [(x.reference_type,x.label,x.price,x.price_low,x.price_high) for x in r.reference_levels])"
 ```
 
 Frontend checks:
@@ -760,10 +882,10 @@ npm run lint
 - Final WACC should be reviewed after any signal adjustments to ensure it remains inside the intended range.
 - Technical volume-by-price currently uses daily OHLCV only. It is an approximation, not a true intraday volume profile.
 - Technical volume allocation uses a typical-price weighting method, but still cannot know the real intraday price-volume distribution without intraday bars or tick data.
-- Technical levels currently use one year only. Multi-period profiles such as 3M / 2Y / 3Y are not implemented yet.
+- Primary technical zones still use the latest one-year profile. The separate `long_term_zones` layer uses up to three years as reference context only and is not mixed into the primary price map.
 - Technical support/resistance does not currently use options open interest, gamma, VWAP, or analyst target clusters.
 - Technical invalidation text uses price and ATR buffers only. Relative volume confirmation, multi-day confirmation, and retest logic are not implemented yet.
-- Reference levels are intentionally separated from volume-confirmed zones. A moving average or prior high alone should not be read as a strong support/resistance zone.
+- Reference levels are intentionally separated from volume-confirmed zones. A moving average, Fibonacci retracement, gap, or prior high/low alone should not be read as a strong support/resistance zone.
 - The frontend still reflects the current MVP flow and may need UI updates for manual peer management and database inspection.
 
 ## License

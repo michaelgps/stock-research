@@ -302,7 +302,7 @@ def _fmp_forward_estimates(estimates: list[AnalystEstimateData] | None) -> list[
         if (
             estimate.eps_estimate is not None
             and estimate.eps_estimate > 0
-            and estimate.source in {"fmp", "yfinance"}
+            and estimate.source in {"fmp", "alpha_vantage", "yfinance"}
             and estimate.period
             and str(estimate.period).isdigit()
         )
@@ -337,6 +337,7 @@ def _weighted_future_growth(
     target_index = next((idx for idx, row in enumerate(rows) if str(row.period) == target), None)
     if target_index is None:
         return None, []
+    target_row = rows[target_index]
 
     weighted_pairs = []
     segments = []
@@ -355,6 +356,18 @@ def _weighted_future_growth(
         )
         if partial_growth is not None:
             segments.append(partial_growth)
+            weighted_pairs = [(target_index, target_index + 1, 0.30)]
+        elif latest_actual_eps is not None and latest_actual_eps > 0:
+            growth = (target_row.eps_estimate / latest_actual_eps) - 1
+            if -0.95 < growth <= 3.0:
+                previous_period = str(int(target_row.period) - 1) if str(target_row.period).isdigit() else "latest_actual_fy"
+                segments.append({
+                    "from_period": previous_period,
+                    "to_period": str(target_row.period),
+                    "growth": growth,
+                    "weight": 0.70,
+                    "basis": "latest_actual_annual_eps",
+                })
             weighted_pairs = [(target_index, target_index + 1, 0.30)]
         else:
             weighted_pairs = [
@@ -569,6 +582,261 @@ def _deceleration_adjustment(deceleration: float | None) -> float:
     return 0.0
 
 
+def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
+
+
+def _mean(values: list[float]) -> float | None:
+    clean = [value for value in values if value is not None]
+    return sum(clean) / len(clean) if clean else None
+
+
+def _coefficient_of_variation(values: list[float]) -> float:
+    clean = [value for value in values if value is not None]
+    if len(clean) < 3:
+        return 0.0
+    avg = _mean(clean)
+    if avg is None or abs(avg) < 1e-9:
+        return 0.0
+    variance = sum((value - avg) ** 2 for value in clean) / len(clean)
+    return abs(variance ** 0.5 / avg)
+
+
+def _annual_eps_values(data: FinancialDataResponse) -> list[float]:
+    factors = _share_adjustment_factors(data.annual_statements)
+    values = []
+    for statement in data.annual_statements:
+        if statement.period != "annual":
+            continue
+        shares = statement.diluted_shares
+        if not shares or shares <= 0 or statement.net_income is None:
+            continue
+        adjusted_shares = shares * factors.get(statement.fiscal_year, 1.0)
+        if adjusted_shares > 0:
+            values.append(statement.net_income / adjusted_shares)
+    return values
+
+
+def _normalized_positive_eps(data: FinancialDataResponse) -> float | None:
+    positives = [value for value in _annual_eps_values(data) if value > 0]
+    if not positives:
+        return None
+    return _percentile(positives, 0.50)
+
+
+def _industry_cyclicality_score(data: FinancialDataResponse) -> tuple[float, list[str]]:
+    sector = (data.company.sector or "").lower()
+    industry = (data.company.industry or "").lower()
+    name = (data.company.name or "").lower()
+    ticker = (data.company.ticker or "").upper()
+    text = f"{ticker.lower()} {name} {sector} {industry}"
+    score = 0.0
+    reasons: list[str] = []
+
+    memory_tickers = {"MU", "WDC", "STX"}
+    if ticker in memory_tickers or any(term in text for term in ["micron", "memory", "dram", "nand", "storage"]):
+        score = max(score, 0.90)
+        reasons.append("memory_or_storage_cycle")
+    elif any(term in text for term in ["semiconductor equipment", "semiconductor"]):
+        score = max(score, 0.50)
+        reasons.append("semiconductor_cycle")
+
+    cyclical_terms = {
+        "energy": 0.75,
+        "oil": 0.75,
+        "gas": 0.75,
+        "metals": 0.80,
+        "mining": 0.80,
+        "steel": 0.80,
+        "chemical": 0.60,
+        "auto": 0.70,
+        "vehicle": 0.70,
+        "airline": 0.75,
+        "shipping": 0.75,
+        "homebuilder": 0.65,
+        "bank": 0.55,
+    }
+    for term, term_score in cyclical_terms.items():
+        if term in text:
+            score = max(score, term_score)
+            reasons.append(f"{term}_cycle")
+
+    if any(term in text for term in ["software", "cloud", "internet", "advertising", "entertainment"]):
+        score = min(score, 0.45) if score else 0.25
+        reasons.append("less_commodity_like_business")
+
+    return _clamp(score), reasons
+
+
+def _financial_cyclicality_score(data: FinancialDataResponse) -> tuple[float, list[str]]:
+    annual = [row for row in data.annual_statements if row.period == "annual"]
+    gross_margins = [
+        row.gross_profit / row.revenue
+        for row in annual
+        if row.revenue and row.revenue > 0 and row.gross_profit is not None
+    ]
+    fcf_margins = [
+        row.free_cash_flow / row.revenue
+        for row in annual
+        if row.revenue and row.revenue > 0 and row.free_cash_flow is not None
+    ]
+    eps_values = _annual_eps_values(data)
+    score = 0.0
+    reasons: list[str] = []
+
+    gross_cv = _coefficient_of_variation(gross_margins)
+    if gross_cv > 0.45:
+        score += 0.25
+        reasons.append("high_gross_margin_volatility")
+    elif gross_cv > 0.25:
+        score += 0.15
+        reasons.append("moderate_gross_margin_volatility")
+
+    fcf_cv = _coefficient_of_variation(fcf_margins)
+    if fcf_cv > 0.75:
+        score += 0.20
+        reasons.append("high_fcf_margin_volatility")
+    elif fcf_cv > 0.40:
+        score += 0.10
+        reasons.append("moderate_fcf_margin_volatility")
+
+    if eps_values:
+        negatives = sum(1 for value in eps_values if value <= 0)
+        if negatives:
+            score += 0.20
+            reasons.append("loss_years_in_history")
+        eps_cv = _coefficient_of_variation([value for value in eps_values if value > 0])
+        if eps_cv > 0.85:
+            score += 0.20
+            reasons.append("high_eps_volatility")
+        elif eps_cv > 0.45:
+            score += 0.10
+            reasons.append("moderate_eps_volatility")
+
+    return _clamp(score), reasons
+
+
+def _cyclicality_profile(data: FinancialDataResponse) -> dict:
+    industry_score, industry_reasons = _industry_cyclicality_score(data)
+    financial_score, financial_reasons = _financial_cyclicality_score(data)
+    score = _clamp(max(industry_score, 0.55 * industry_score + 0.45 * financial_score))
+    if score >= 0.70:
+        label = "high"
+    elif score >= 0.35:
+        label = "medium"
+    else:
+        label = "low"
+    return {
+        "score": round(score, 4),
+        "label": label,
+        "reasons": sorted(set(industry_reasons + financial_reasons)),
+    }
+
+
+def _peak_earnings_risk(
+    data: FinancialDataResponse,
+    forward_eps: float | None,
+    weighted_growth: float | None,
+    cyclicality_score: float,
+) -> tuple[float, list[str]]:
+    risk = 0.0
+    reasons: list[str] = []
+    normalized_eps = _normalized_positive_eps(data)
+    if normalized_eps and forward_eps and forward_eps > 0:
+        ratio = forward_eps / normalized_eps
+        if ratio > 3.0 and cyclicality_score >= 0.35:
+            risk += 0.45
+            reasons.append("forward_eps_far_above_normalized_eps")
+        elif ratio > 1.8 and cyclicality_score >= 0.50:
+            risk += 0.25
+            reasons.append("forward_eps_above_normalized_eps")
+
+    if cyclicality_score >= 0.70:
+        risk += 0.25
+        reasons.append("high_cyclicality")
+    elif cyclicality_score >= 0.35:
+        risk += 0.10
+        reasons.append("medium_cyclicality")
+
+    if weighted_growth is not None and weighted_growth > 0.35 and cyclicality_score >= 0.50:
+        risk += 0.20
+        reasons.append("high_growth_in_cyclical_business")
+
+    return _clamp(risk), reasons
+
+
+def _structural_re_rating_score(
+    data: FinancialDataResponse,
+    weighted_growth: float | None,
+    segments: list[dict],
+    cyclicality_score: float,
+) -> tuple[float, list[str]]:
+    score = 0.25
+    reasons: list[str] = []
+    sector = (data.company.sector or "").lower()
+    industry = (data.company.industry or "").lower()
+
+    if weighted_growth is not None:
+        if weighted_growth >= 0.25:
+            score += 0.20
+            reasons.append("strong_weighted_growth")
+        elif weighted_growth >= 0.12:
+            score += 0.10
+            reasons.append("moderate_weighted_growth")
+
+    clean_segments = [segment for segment in segments if segment.get("growth") is not None]
+    if len(clean_segments) >= 2 and clean_segments[1]["growth"] >= 0.15:
+        score += 0.15
+        reasons.append("second_forward_segment_still_growing")
+    if len(clean_segments) >= 2 and clean_segments[0]["growth"] - clean_segments[1]["growth"] > 0.25:
+        score -= 0.15
+        reasons.append("large_near_term_deceleration")
+
+    if data.company.market_cap and data.company.market_cap >= 300_000_000_000:
+        score += 0.10
+        reasons.append("large_cap_quality")
+    if any(term in sector for term in ["technology", "communication"]):
+        score += 0.05
+        reasons.append("platform_or_growth_sector")
+    if any(term in industry for term in ["memory", "dram", "nand", "storage"]):
+        score -= 0.25
+        reasons.append("memory_growth_needs_proof")
+
+    score -= cyclicality_score * 0.35
+    if cyclicality_score >= 0.50:
+        reasons.append("cyclicality_reduces_re_rating_confidence")
+
+    return _clamp(score), reasons
+
+
+def _apply_cyclical_re_rating(
+    low: float,
+    high: float,
+    hist: dict,
+    structural_score: float,
+    peak_risk: float,
+    cyclicality_score: float,
+) -> tuple[float, float]:
+    if cyclicality_score < 0.25 and peak_risk < 0.15:
+        return round(low, 1), round(high, 1)
+
+    hist_mid = hist.get("recent_p50") or hist.get("p50")
+    if not hist_mid:
+        hist_mid = (low + high) / 2
+    hist_low = max(5.0, hist_mid * 0.85)
+    hist_high = max(hist_low + 4.0, hist_mid * 1.25)
+
+    blended_low = hist_low * (1 - structural_score) + low * structural_score
+    blended_high = hist_high * (1 - structural_score) + high * structural_score
+    penalty = 1 - 0.35 * peak_risk
+    blended_low *= penalty
+    blended_high *= penalty
+
+    if blended_high < blended_low + 4:
+        blended_high = blended_low + 4
+    return round(max(5.0, blended_low), 1), round(max(7.0, blended_high), 1)
+
+
 def _uncertainty_adjustment(data: FinancialDataResponse, weighted_growth: float | None, segments: list[dict]) -> tuple[float, list[str]]:
     industry = (data.company.industry or "").lower()
     sector = (data.company.sector or "").lower()
@@ -657,6 +925,19 @@ def compute_auto_pe_cases(
     deceleration = _growth_deceleration(segments)
     decel_adj = _deceleration_adjustment(deceleration)
     uncertainty_adj, uncertainty_reasons = _uncertainty_adjustment(data, weighted_growth, segments)
+    cyclicality = _cyclicality_profile(data)
+    peak_risk, peak_reasons = _peak_earnings_risk(
+        data,
+        forward_eps=forward_eps,
+        weighted_growth=weighted_growth,
+        cyclicality_score=cyclicality["score"],
+    )
+    structural_score, structural_reasons = _structural_re_rating_score(
+        data,
+        weighted_growth=weighted_growth,
+        segments=segments,
+        cyclicality_score=cyclicality["score"],
+    )
     industry = (data.company.industry or "").lower()
     is_semiconductor = "semiconductor" in industry
 
@@ -666,6 +947,14 @@ def compute_auto_pe_cases(
         quality_adj + decel_adj + uncertainty_adj,
     )
     adjusted_low, adjusted_high = _apply_historical_guardrail(adjusted_low, adjusted_high, hist)
+    adjusted_low, adjusted_high = _apply_cyclical_re_rating(
+        adjusted_low,
+        adjusted_high,
+        hist,
+        structural_score=structural_score,
+        peak_risk=peak_risk,
+        cyclicality_score=cyclicality["score"],
+    )
 
     common_details = {
         "weighted_eps_growth": round(weighted_growth, 4) if weighted_growth is not None else None,
@@ -673,7 +962,14 @@ def compute_auto_pe_cases(
         "quality_adjustment": round(quality_adj, 1),
         "deceleration_adjustment": round(decel_adj, 1),
         "uncertainty_adjustment": round(uncertainty_adj, 1),
-        "uncertainty_reasons": uncertainty_reasons,
+        "uncertainty_reasons": uncertainty_reasons + peak_reasons,
+        "cyclicality_score": cyclicality["score"],
+        "cyclicality_label": cyclicality["label"],
+        "cyclicality_reasons": cyclicality["reasons"],
+        "peak_earnings_risk": round(peak_risk, 4),
+        "peak_earnings_reasons": peak_reasons,
+        "structural_re_rating_score": round(structural_score, 4),
+        "structural_re_rating_reasons": structural_reasons,
         "historical_guardrail_pe": hist.get("recent_p75") or hist.get("p75"),
         "growth_segments": [
             {
@@ -685,7 +981,7 @@ def compute_auto_pe_cases(
         ],
         "explanation": (
             f"Growth curve {growth_curve}; adjusted for company quality, growth deceleration, "
-            "estimate uncertainty, and a soft historical P/E guardrail."
+            "estimate uncertainty, cyclicality/peak-earnings risk, and a soft historical P/E guardrail."
         ),
     }
 
@@ -694,6 +990,22 @@ def compute_auto_pe_cases(
     if weighted_growth is not None and weighted_growth > 0.35 and deceleration is not None and deceleration > 0.20:
         high_low, high_high = _apply_historical_guardrail(30.0, 42.0, hist)
         decel_low, decel_high = _apply_historical_guardrail(22.0, 32.0, hist)
+        high_low, high_high = _apply_cyclical_re_rating(
+            high_low,
+            high_high,
+            hist,
+            structural_score=structural_score,
+            peak_risk=peak_risk,
+            cyclicality_score=cyclicality["score"],
+        )
+        decel_low, decel_high = _apply_cyclical_re_rating(
+            decel_low,
+            decel_high,
+            hist,
+            structural_score=min(structural_score, 0.45),
+            peak_risk=peak_risk,
+            cyclicality_score=cyclicality["score"],
+        )
         cases = [
             _case(
                 "high_growth",
@@ -715,6 +1027,22 @@ def compute_auto_pe_cases(
     elif weighted_growth is not None and weighted_growth > 0.40 and is_semiconductor:
         base_low, base_high = _apply_historical_guardrail(30.0, 40.0, hist)
         visibility_low, visibility_high = _apply_historical_guardrail(40.0, 50.0, hist)
+        base_low, base_high = _apply_cyclical_re_rating(
+            base_low,
+            base_high,
+            hist,
+            structural_score=structural_score,
+            peak_risk=peak_risk,
+            cyclicality_score=cyclicality["score"],
+        )
+        visibility_low, visibility_high = _apply_cyclical_re_rating(
+            visibility_low,
+            visibility_high,
+            hist,
+            structural_score=min(1.0, structural_score + 0.15),
+            peak_risk=max(0.0, peak_risk - 0.10),
+            cyclicality_score=cyclicality["score"],
+        )
         cases = [
             _case(
                 "base_visibility",
@@ -762,6 +1090,7 @@ def compute_forward_trend(
             "eps": round(estimate.eps_estimate, 2),
             "pe_multiple": round(period_pe, 1),
             "implied_price": price,
+            "source": estimate.source,
         })
     return trend
 

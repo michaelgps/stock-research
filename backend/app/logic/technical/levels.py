@@ -6,16 +6,19 @@ from app.data_structure.technical import TechnicalLevelsResponse, TechnicalRefer
 
 
 _LOOKBACK_DAYS = 252
+_LONG_TERM_LOOKBACK_DAYS = 756
+_MIN_LONG_TERM_DAYS = 504
 _MAX_ZONES_PER_SIDE = 3
 _MEDIUM_PERCENTILE = 0.60  # top 40% of this ticker's own price-volume bins
 _STRONG_PERCENTILE = 0.80  # top 20%
-_MAX_MAIN_DISTANCE_PCT = 0.15
+_MAX_MAIN_DISTANCE_PCT = 0.30
 _MA_CONFLUENCE_ATR = 0.25
 
 
 def compute_technical_levels(ticker: str, daily_prices: list[dict]) -> TechnicalLevelsResponse:
     """Compute support/resistance zones from direct price-by-volume clusters."""
-    prices = _clean_prices(daily_prices)[-_LOOKBACK_DAYS:]
+    all_prices = _clean_prices(daily_prices)
+    prices = all_prices[-_LOOKBACK_DAYS:]
     if len(prices) < 60:
         raise ValueError(f"Not enough daily prices for {ticker}; need at least 60 trading days.")
 
@@ -24,14 +27,53 @@ def compute_technical_levels(ticker: str, daily_prices: list[dict]) -> Technical
     atr20 = _average_true_range(prices, 20) or max(current_price * 0.02, 0.01)
     atr20_pct = atr20 / current_price
 
+    zones = _compute_volume_zones(prices, current_price, atr20)
+    moving_averages = _moving_average_levels(prices, current_price)
+    _apply_moving_average_confluence(zones, moving_averages, atr20)
+    support, resistance, active = _split_and_rank(zones, current_price)
+    reference_levels = _reference_levels(prices, current_price, atr20, moving_averages)
+    long_term_zones = _long_term_volume_references(all_prices, current_price, atr20)
+
+    notes = [
+        "Daily OHLCV volume-by-price model; not a short-term price prediction.",
+        "Each day distributes volume toward typical price instead of evenly across high-low.",
+        "Strong zones are continuous price ranges in the top 20% of this ticker's own volume bins.",
+        "Medium zones are continuous price ranges in the top 40%, excluding areas already covered by strong zones.",
+        "A zone is discarded if it is too narrow versus the stock's normal daily swing.",
+        "Main zones only show areas within 30% of the current price.",
+        "Moving averages, gaps, prior highs/lows, and Fibonacci retracements are references, not volume-confirmed zones.",
+        "Longer-term zones use up to 3Y daily OHLCV and are displayed as references, not primary 1Y support/resistance.",
+    ]
+    if not resistance:
+        notes.append("No qualified resistance zone above current price from the volume profile.")
+    if not support:
+        notes.append("No qualified support zone below current price from the volume profile.")
+
+    return TechnicalLevelsResponse(
+        ticker=ticker.upper(),
+        current_price=round(current_price, 2),
+        analysis_date=analysis_date,
+        lookback_days=len(prices),
+        atr20=round(atr20, 2),
+        atr20_pct=round(atr20_pct, 4),
+        support_zones=[_to_response_zone(zone, current_price, atr20) for zone in support],
+        resistance_zones=[_to_response_zone(zone, current_price, atr20) for zone in resistance],
+        active_zones=[_to_response_zone(zone, current_price, atr20) for zone in active],
+        long_term_zones=long_term_zones,
+        reference_levels=reference_levels,
+        notes=notes,
+    )
+
+
+def _compute_volume_zones(prices: list[dict], current_price: float, atr: float) -> list[dict]:
     profile = _build_volume_profile(prices, current_price)
     if not profile:
-        raise ValueError(f"Not enough valid volume data for {ticker}.")
+        raise ValueError("Not enough valid volume data.")
 
     volumes = [item["volume"] for item in profile]
     medium_threshold = _percentile(volumes, _MEDIUM_PERCENTILE)
     strong_threshold = _percentile(volumes, _STRONG_PERCENTILE)
-    min_width = max(0.5 * atr20, profile[0]["width"] * 2)
+    min_width = max(0.5 * atr, profile[0]["width"] * 2)
 
     strong_zones = _zones_from_threshold(
         profile=profile,
@@ -56,39 +98,7 @@ def compute_technical_levels(ticker: str, daily_prices: list[dict]) -> Technical
         zone for zone in sorted(strong_zones + medium_zones, key=lambda zone: zone["low"])
         if _distance_to_zone(current_price, zone["low"], zone["high"]) / current_price <= _MAX_MAIN_DISTANCE_PCT
     ]
-    zones = _merge_nearby_zones(zones, max_gap=max(profile[0]["width"], 0.10 * atr20))
-    moving_averages = _moving_average_levels(prices, current_price)
-    _apply_moving_average_confluence(zones, moving_averages, atr20)
-    support, resistance, active = _split_and_rank(zones, current_price)
-    reference_levels = _reference_levels(prices, current_price, atr20, moving_averages)
-
-    notes = [
-        "Daily OHLCV volume-by-price model; not a short-term price prediction.",
-        "Each day distributes volume toward typical price instead of evenly across high-low.",
-        "Strong zones are continuous price ranges in the top 20% of this ticker's own volume bins.",
-        "Medium zones are continuous price ranges in the top 40%, excluding areas already covered by strong zones.",
-        "A zone is discarded if it is too narrow versus the stock's normal daily swing.",
-        "Main zones only show areas within 15% of the current price.",
-        "Moving averages, gaps, and prior highs/lows are references, not volume-confirmed zones.",
-    ]
-    if not resistance:
-        notes.append("No qualified resistance zone above current price from the volume profile.")
-    if not support:
-        notes.append("No qualified support zone below current price from the volume profile.")
-
-    return TechnicalLevelsResponse(
-        ticker=ticker.upper(),
-        current_price=round(current_price, 2),
-        analysis_date=analysis_date,
-        lookback_days=len(prices),
-        atr20=round(atr20, 2),
-        atr20_pct=round(atr20_pct, 4),
-        support_zones=[_to_response_zone(zone, current_price, atr20) for zone in support],
-        resistance_zones=[_to_response_zone(zone, current_price, atr20) for zone in resistance],
-        active_zones=[_to_response_zone(zone, current_price, atr20) for zone in active],
-        reference_levels=reference_levels,
-        notes=notes,
-    )
+    return _merge_nearby_zones(zones, max_gap=max(profile[0]["width"], 0.10 * atr))
 
 
 def _clean_prices(daily_prices: list[dict]) -> list[dict]:
@@ -360,12 +370,49 @@ def _reference_levels(
         ))
     references.extend(_gap_reference_levels(prices, current_price, atr))
     references.extend(_prior_high_low_references(prices, current_price))
+    references.extend(_fibonacci_reference_levels(prices, current_price))
     references = [
         ref for ref in references
         if ref.distance_to_current_pct is None or abs(ref.distance_to_current_pct) <= _MAX_MAIN_DISTANCE_PCT
     ]
     references.sort(key=lambda ref: abs(ref.distance_to_current_pct or 0))
-    return references[:8]
+    return references[:10]
+
+
+def _long_term_volume_references(
+    all_prices: list[dict],
+    current_price: float,
+    current_atr: float,
+) -> list[TechnicalZone]:
+    prices = all_prices[-_LONG_TERM_LOOKBACK_DAYS:]
+    if len(prices) < _MIN_LONG_TERM_DAYS:
+        return []
+
+    long_term_atr = _average_true_range(prices, 20) or current_atr
+    try:
+        zones = _compute_volume_zones(prices, current_price, long_term_atr)
+    except ValueError:
+        return []
+
+    support, resistance, active = _split_and_rank(zones, current_price)
+    selected = [*active, *support[:2], *resistance[:2]]
+    response_zones = []
+    for zone in selected:
+        response_zone = _to_response_zone(zone, current_price, current_atr)
+        response_zone.evidence = list(dict.fromkeys([
+            *response_zone.evidence,
+            "long_term_volume_profile",
+        ]))
+        response_zone.raw_details["lookback_days"] = len(prices)
+        response_zone.raw_details["timeframe"] = "3Y"
+        response_zone.raw_details["primary_signal"] = False
+        response_zones.append(response_zone)
+    response_zones.sort(key=lambda zone: (
+        0 if zone.level_type == "active" else 1 if zone.level_type == "support" else 2,
+        abs(zone.distance_to_current_pct or 0),
+        -zone.strength_score,
+    ))
+    return response_zones[:5]
 
 
 def _gap_reference_levels(prices: list[dict], current_price: float, atr: float) -> list[TechnicalReferenceLevel]:
@@ -429,6 +476,66 @@ def _prior_high_low_references(prices: list[dict], current_price: float) -> list
             raw_details={"date": low["date"]},
         ),
     ]
+
+
+def _fibonacci_reference_levels(prices: list[dict], current_price: float) -> list[TechnicalReferenceLevel]:
+    """Return common Fibonacci retracement references from the dominant 1Y swing."""
+    if len(prices) < 60:
+        return []
+
+    low_index, low_row = min(enumerate(prices), key=lambda item: item[1]["low"])
+    high_index, high_row = max(enumerate(prices), key=lambda item: item[1]["high"])
+    low = low_row["low"]
+    high = high_row["high"]
+    swing = high - low
+    if low <= 0 or swing <= max(current_price * 0.05, 0.01):
+        return []
+
+    if low_index < high_index:
+        trend = "uptrend"
+        levels = [
+            (0.382, high - swing * 0.382),
+            (0.500, high - swing * 0.500),
+            (0.618, high - swing * 0.618),
+            (0.786, high - swing * 0.786),
+        ]
+        anchor_details = {
+            "trend": trend,
+            "swing_low": round(low, 2),
+            "swing_low_date": low_row["date"],
+            "swing_high": round(high, 2),
+            "swing_high_date": high_row["date"],
+        }
+    else:
+        trend = "downtrend"
+        levels = [
+            (0.382, low + swing * 0.382),
+            (0.500, low + swing * 0.500),
+            (0.618, low + swing * 0.618),
+            (0.786, low + swing * 0.786),
+        ]
+        anchor_details = {
+            "trend": trend,
+            "swing_high": round(high, 2),
+            "swing_high_date": high_row["date"],
+            "swing_low": round(low, 2),
+            "swing_low_date": low_row["date"],
+        }
+
+    references = []
+    for ratio, price in levels:
+        references.append(_to_reference_level(
+            reference_type="fibonacci",
+            level_type=_classify_reference(current_price, price),
+            label=f"Fib {ratio * 100:.1f}% retracement",
+            current_price=current_price,
+            price=price,
+            evidence=["fibonacci_retracement"],
+            raw_details={**anchor_details, "ratio": ratio},
+        ))
+
+    references.sort(key=lambda ref: abs(ref.distance_to_current_pct or 0))
+    return references[:4]
 
 
 def _to_reference_level(

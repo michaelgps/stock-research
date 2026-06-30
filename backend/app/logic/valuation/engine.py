@@ -93,7 +93,24 @@ async def run_valuation(
         "DCF-implied P/E and manual peers are cross-checks only, not P/E inputs."
     )
 
-    # --- Cross-validate FMP EPS with Yahoo Finance ---
+    # --- Cross-validate/fallback with Alpha Vantage before Yahoo Finance ---
+    try:
+        alpha_validation = await _load_or_fetch_alpha_vantage_validation(data, db)
+        data_quality["alpha_vantage_eps_validation"] = alpha_validation
+        alpha_fallback_estimates = _build_alpha_vantage_forward_eps_estimates(alpha_validation)
+        if forward_eps is None and alpha_fallback_estimates:
+            valuation_analyst_estimates.extend(alpha_fallback_estimates)
+            forward_eps_estimate = alpha_fallback_estimates[0]
+            forward_eps = forward_eps_estimate.eps_estimate
+            data_quality["forward_eps_fallback_warning"] = (
+                "FMP annual analyst EPS is unavailable for this ticker under the current data plan; "
+                "Alpha Vantage annual EPS estimates are used as the first fallback."
+            )
+    except Exception as e:
+        logger.warning("Alpha Vantage EPS validation failed: %s", e)
+        data_quality["alpha_vantage_eps_validation"] = "error"
+
+    # --- Cross-validate/fallback with Yahoo Finance ---
     try:
         yf_validation = None
         if db is not None:
@@ -184,83 +201,10 @@ async def run_valuation(
         logger.warning("Yahoo Finance cross-validation failed: %s", e)
         data_quality["yf_cross_validation"] = "error"
 
-    try:
-        alpha_validation = None
-        if db is not None:
-            from app.db.financial import Estimate
-            from app.repositories import data_pull_log_repository
-
-            today = data_pull_log_repository.today_str()
-            cached_alpha = db.query(Estimate).filter(
-                Estimate.ticker == data.company.ticker,
-                Estimate.estimate_date == today,
-                Estimate.source == "alpha_vantage",
-                Estimate.estimate_period == "eps_validation",
-            ).first()
-            if cached_alpha and cached_alpha.raw_data_json and data_pull_log_repository.has_success(
-                db, data.company.ticker, "eps_validation", "alpha_vantage", today
-            ):
-                alpha_validation = cached_alpha.raw_data_json
-
-        if alpha_validation is None:
-            alpha_validation = await _cross_validate_alpha_vantage_eps(data)
-            if db is not None:
-                from app.db.financial import Estimate
-                from app.repositories import data_pull_log_repository
-
-                today = data_pull_log_repository.today_str()
-                row = db.query(Estimate).filter(
-                    Estimate.ticker == data.company.ticker,
-                    Estimate.estimate_date == today,
-                    Estimate.source == "alpha_vantage",
-                    Estimate.estimate_period == "eps_validation",
-                ).first()
-                values = {
-                    "record_type": "eps_validation",
-                    "revenue_estimate": None,
-                    "eps_estimate": None,
-                    "revenue_growth_estimate": None,
-                    "actual_eps": None,
-                    "estimated_eps": None,
-                    "surprise": None,
-                    "surprise_percent": None,
-                    "buy_count": None,
-                    "hold_count": None,
-                    "sell_count": None,
-                    "target_price": None,
-                    "raw_data_json": alpha_validation,
-                }
-                if row:
-                    for key, value in values.items():
-                        setattr(row, key, value)
-                else:
-                    db.add(Estimate(
-                        ticker=data.company.ticker,
-                        estimate_date=today,
-                        source="alpha_vantage",
-                        estimate_period="eps_validation",
-                        **values,
-                    ))
-                db.commit()
-                status = "success" if alpha_validation.get("configured") else "empty"
-                data_pull_log_repository.mark(
-                    db,
-                    data.company.ticker,
-                    "eps_validation",
-                    "alpha_vantage",
-                    status,
-                    records_inserted=1 if status == "success" else 0,
-                )
-
-        data_quality["alpha_vantage_eps_validation"] = alpha_validation
-    except Exception as e:
-        logger.warning("Alpha Vantage EPS validation failed: %s", e)
-        data_quality["alpha_vantage_eps_validation"] = "error"
-
     data_quality["forward_eps_validation_policy"] = (
         "Primary valuation uses only the first 3 forward fiscal-year EPS estimates. "
-        "FMP is preferred; Yahoo Finance may be used as a fallback when FMP forward EPS is unavailable. "
-        "Optional Alpha Vantage is a cross-check to catch obvious estimate errors."
+        "FMP is preferred; Alpha Vantage is the first fallback when configured; "
+        "Yahoo Finance is the final near-term fallback when FMP/Alpha forward EPS is unavailable."
     )
 
     valuation_data = _with_analyst_estimates(data, valuation_analyst_estimates)
@@ -369,12 +313,18 @@ async def run_valuation(
         base_pe_mult or 20,
         pe_by_period=base_pe_by_period,
     )
+    eps_validation_by_period = _build_forward_trend_validation_map(
+        valuation_data,
+        data_quality,
+    )
     forward_trend = [
         ForwardYearEstimate(
             year=t["year"],
             eps=t["eps"],
             pe_multiple=t.get("pe_multiple"),
             implied_price=t["implied_price"],
+            source=t.get("source"),
+            **eps_validation_by_period.get(str(t["year"]), {}),
         )
         for t in trend_raw
     ]
@@ -534,6 +484,90 @@ def _build_yfinance_forward_eps_estimates(
     return estimates
 
 
+def _build_alpha_vantage_forward_eps_estimates(
+    alpha_validation: dict | None,
+) -> list[AnalystEstimateData]:
+    """Convert Alpha Vantage validation output into valuation-ready estimates."""
+    if not isinstance(alpha_validation, dict):
+        return []
+    estimates = []
+    for item in alpha_validation.get("estimates") or []:
+        period = item.get("period")
+        eps = _positive_number(item.get("eps_estimate"))
+        if period and str(period).isdigit() and eps is not None:
+            estimates.append(AnalystEstimateData(
+                period=str(period),
+                eps_estimate=eps,
+                source="alpha_vantage",
+            ))
+    estimates.sort(key=lambda estimate: int(estimate.period))
+    return estimates[:_MAX_FORWARD_VALUATION_YEARS]
+
+
+def _build_forward_trend_validation_map(
+    data: FinancialDataResponse,
+    data_quality: dict,
+    tolerance: float = 0.05,
+) -> dict[str, dict]:
+    """Mark each forward EPS year as cross-checked or single-source only."""
+    sources_by_period: dict[str, dict[str, float]] = {}
+
+    for estimate in data.analyst_estimates:
+        if not estimate.period or not str(estimate.period).isdigit():
+            continue
+        eps = _positive_number(estimate.eps_estimate)
+        if eps is None:
+            continue
+        source = estimate.source or "unknown"
+        sources_by_period.setdefault(str(estimate.period), {})[source] = eps
+
+    alpha = data_quality.get("alpha_vantage_eps_validation")
+    if isinstance(alpha, dict):
+        for item in alpha.get("estimates") or []:
+            period = item.get("period")
+            eps = _positive_number(item.get("eps_estimate"))
+            if period and str(period).isdigit() and eps is not None:
+                sources_by_period.setdefault(str(period), {})["alpha_vantage"] = eps
+
+    yf = data_quality.get("yf_cross_validation")
+    if isinstance(yf, dict):
+        current_fy = _infer_current_forward_fiscal_year(data)
+        current_eps = _positive_number(yf.get("yf_current_fy_eps"))
+        next_eps = _positive_number(yf.get("yf_next_fy_eps"))
+        if current_fy and current_eps is not None:
+            sources_by_period.setdefault(str(current_fy), {})["yfinance"] = current_eps
+        if current_fy and next_eps is not None:
+            sources_by_period.setdefault(str(current_fy + 1), {})["yfinance"] = next_eps
+
+    validation: dict[str, dict] = {}
+    for period, source_values in sources_by_period.items():
+        if not source_values:
+            continue
+        names = sorted(source_values)
+        matched_sources: set[str] = set()
+        for left_name, left_eps in source_values.items():
+            for right_name, right_eps in source_values.items():
+                if left_name == right_name:
+                    continue
+                if left_eps <= 0:
+                    continue
+                if abs(left_eps - right_eps) / left_eps <= tolerance:
+                    matched_sources.update([left_name, right_name])
+        if matched_sources:
+            validation[period] = {
+                "eps_validation_status": "cross_checked",
+                "eps_validation_sources": sorted(matched_sources),
+                "eps_validation_note": f"EPS agrees within {round(tolerance * 100)}% across sources.",
+            }
+        else:
+            validation[period] = {
+                "eps_validation_status": "unverified",
+                "eps_validation_sources": names,
+                "eps_validation_note": "Only one source is available for this forward EPS year, or sources do not agree within tolerance.",
+            }
+    return validation
+
+
 def _infer_current_forward_fiscal_year(data: FinancialDataResponse) -> int | None:
     """Infer the current forward fiscal year when Yahoo labels estimates as 0y/+1y."""
     latest_reported_fy = max(
@@ -555,6 +589,8 @@ def _positive_number(value) -> float | None:
 
 
 def _forward_eps_source_label(estimate: AnalystEstimateData | None) -> str:
+    if estimate and estimate.source == "alpha_vantage":
+        return "alpha_vantage_annual_eps_estimates_fallback"
     if estimate and estimate.source == "yfinance":
         return "yfinance_fallback_current_fy_consensus"
     if estimate and estimate.source == "fmp":
@@ -636,6 +672,7 @@ async def _cross_validate_alpha_vantage_eps(
         return {
             "configured": False,
             "source": "alpha_vantage",
+            "estimates": [],
             "matches": [],
             "warning": False,
             "note": "ALPHA_VANTAGE_API_KEY is not configured.",
@@ -658,6 +695,14 @@ async def _cross_validate_alpha_vantage_eps(
         data.company.ticker,
         limit=_MAX_FORWARD_VALUATION_YEARS,
     )
+    alpha_public_estimates = [
+        {
+            "period": item["period"],
+            "eps_estimate": round(item["eps_estimate"], 4),
+        }
+        for item in alpha_estimates
+        if item.get("period") and item.get("eps_estimate") is not None
+    ]
     alpha_by_period = {item["period"]: item for item in alpha_estimates}
 
     matches = []
@@ -683,9 +728,90 @@ async def _cross_validate_alpha_vantage_eps(
     return {
         "configured": True,
         "source": "alpha_vantage",
+        "estimates": alpha_public_estimates,
         "matches": matches,
         "warning": warning,
     }
+
+
+async def _load_or_fetch_alpha_vantage_validation(
+    data: FinancialDataResponse,
+    db,
+) -> dict:
+    alpha_validation = None
+    if db is not None:
+        from app.db.financial import Estimate
+        from app.repositories import data_pull_log_repository
+
+        today = data_pull_log_repository.today_str()
+        cached_alpha = db.query(Estimate).filter(
+            Estimate.ticker == data.company.ticker,
+            Estimate.estimate_date == today,
+            Estimate.source == "alpha_vantage",
+            Estimate.estimate_period == "eps_validation",
+        ).first()
+        if cached_alpha and cached_alpha.raw_data_json and data_pull_log_repository.has_success(
+            db, data.company.ticker, "eps_validation", "alpha_vantage", today
+        ):
+            cached_payload = cached_alpha.raw_data_json
+            if cached_payload.get("estimates"):
+                alpha_validation = cached_payload
+
+    if alpha_validation is not None:
+        return alpha_validation
+
+    alpha_validation = await _cross_validate_alpha_vantage_eps(data)
+    if db is not None:
+        from app.db.financial import Estimate
+        from app.repositories import data_pull_log_repository
+
+        today = data_pull_log_repository.today_str()
+        row = db.query(Estimate).filter(
+            Estimate.ticker == data.company.ticker,
+            Estimate.estimate_date == today,
+            Estimate.source == "alpha_vantage",
+            Estimate.estimate_period == "eps_validation",
+        ).first()
+        first_estimate = (alpha_validation.get("estimates") or [{}])[0]
+        values = {
+            "record_type": "eps_validation",
+            "revenue_estimate": None,
+            "eps_estimate": first_estimate.get("eps_estimate"),
+            "revenue_growth_estimate": None,
+            "actual_eps": None,
+            "estimated_eps": None,
+            "surprise": None,
+            "surprise_percent": None,
+            "buy_count": None,
+            "hold_count": None,
+            "sell_count": None,
+            "target_price": None,
+            "raw_data_json": alpha_validation,
+        }
+        if row:
+            for key, value in values.items():
+                setattr(row, key, value)
+        else:
+            db.add(Estimate(
+                ticker=data.company.ticker,
+                estimate_date=today,
+                source="alpha_vantage",
+                estimate_period="eps_validation",
+                **values,
+            ))
+        db.commit()
+        configured = bool(alpha_validation.get("configured"))
+        has_estimates = bool(alpha_validation.get("estimates"))
+        status = "success" if configured and has_estimates else "empty"
+        data_pull_log_repository.mark(
+            db,
+            data.company.ticker,
+            "eps_validation",
+            "alpha_vantage",
+            status,
+            records_inserted=1 if status == "success" else 0,
+        )
+    return alpha_validation
 
 
 def _build_pe_case_details_by_period(
@@ -704,7 +830,7 @@ def _build_pe_case_details_by_period(
             and str(estimate.period).isdigit()
             and estimate.eps_estimate is not None
             and estimate.eps_estimate > 0
-            and estimate.source in {"fmp", "yfinance"}
+            and estimate.source in {"fmp", "alpha_vantage", "yfinance"}
         )
     }, key=int)[:_MAX_FORWARD_VALUATION_YEARS]
     eps_by_period = {
@@ -823,6 +949,13 @@ def _build_fiscal_year_pe_cases(
             deceleration_adjustment=case.get("deceleration_adjustment", 0),
             uncertainty_adjustment=case.get("uncertainty_adjustment", 0),
             uncertainty_reasons=case.get("uncertainty_reasons", []),
+            cyclicality_score=case.get("cyclicality_score"),
+            cyclicality_label=case.get("cyclicality_label"),
+            cyclicality_reasons=case.get("cyclicality_reasons", []),
+            peak_earnings_risk=case.get("peak_earnings_risk"),
+            peak_earnings_reasons=case.get("peak_earnings_reasons", []),
+            structural_re_rating_score=case.get("structural_re_rating_score"),
+            structural_re_rating_reasons=case.get("structural_re_rating_reasons", []),
             historical_guardrail_pe=case.get("historical_guardrail_pe"),
             explanation=case.get("explanation", ""),
         ))

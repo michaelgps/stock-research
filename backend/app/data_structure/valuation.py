@@ -73,7 +73,11 @@ class ForwardYearEstimate(BaseModel):
     year: str
     eps: float
     pe_multiple: float | None = None
-    implied_price: float  # eps × base P/E multiple
+    implied_price: float  # eps x base P/E multiple
+    source: str | None = None
+    eps_validation_status: str = "unverified"
+    eps_validation_sources: list[str] = Field(default_factory=list)
+    eps_validation_note: str | None = None
 
 
 class FiscalYearPECase(BaseModel):
@@ -96,6 +100,13 @@ class FiscalYearPECase(BaseModel):
     deceleration_adjustment: float = 0
     uncertainty_adjustment: float = 0
     uncertainty_reasons: list[str] = Field(default_factory=list)
+    cyclicality_score: float | None = None
+    cyclicality_label: str | None = None
+    cyclicality_reasons: list[str] = Field(default_factory=list)
+    peak_earnings_risk: float | None = None
+    peak_earnings_reasons: list[str] = Field(default_factory=list)
+    structural_re_rating_score: float | None = None
+    structural_re_rating_reasons: list[str] = Field(default_factory=list)
     historical_guardrail_pe: float | None = None
     explanation: str
 
@@ -137,7 +148,7 @@ class PeerComparison(BaseModel):
     median_pe: float | None = None
     cap_weighted_pe: float | None = None
     median_peg: float | None = None  # median PEG across peers
-    growth_adjusted_pe: float | None = None  # median_peg × ticker growth
+    growth_adjusted_pe: float | None = None  # median_peg x ticker growth
 
 
 class ReverseDCF(BaseModel):

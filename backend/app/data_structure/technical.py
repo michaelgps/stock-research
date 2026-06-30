@@ -45,5 +45,6 @@ class TechnicalLevelsResponse(BaseModel):
     support_zones: list[TechnicalZone] = Field(default_factory=list)
     resistance_zones: list[TechnicalZone] = Field(default_factory=list)
     active_zones: list[TechnicalZone] = Field(default_factory=list)
+    long_term_zones: list[TechnicalZone] = Field(default_factory=list)
     reference_levels: list[TechnicalReferenceLevel] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

@@ -128,6 +128,10 @@ export interface ForwardYearEstimate {
   eps: number;
   pe_multiple: number | null;
   implied_price: number;
+  source?: string | null;
+  eps_validation_status?: string;
+  eps_validation_sources?: string[];
+  eps_validation_note?: string | null;
 }
 
 export interface FiscalYearPECase {
@@ -149,6 +153,13 @@ export interface FiscalYearPECase {
   deceleration_adjustment: number;
   uncertainty_adjustment: number;
   uncertainty_reasons: string[];
+  cyclicality_score?: number | null;
+  cyclicality_label?: string | null;
+  cyclicality_reasons?: string[];
+  peak_earnings_risk?: number | null;
+  peak_earnings_reasons?: string[];
+  structural_re_rating_score?: number | null;
+  structural_re_rating_reasons?: string[];
   historical_guardrail_pe: number | null;
   explanation: string;
 }
@@ -252,6 +263,7 @@ export interface TechnicalLevelsResponse {
   support_zones: TechnicalZone[];
   resistance_zones: TechnicalZone[];
   active_zones: TechnicalZone[];
+  long_term_zones: TechnicalZone[];
   reference_levels: TechnicalReferenceLevel[];
   notes: string[];
 }

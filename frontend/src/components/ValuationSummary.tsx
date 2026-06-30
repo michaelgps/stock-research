@@ -131,6 +131,25 @@ function ValuationWindow({ title, fyWindow, badgeClass, currentPrice }: Valuatio
                   U {peCase.uncertainty_adjustment.toFixed(1)}
                 </span>
               </div>
+              <div className="breakdown-row">
+                <span className="breakdown-label">Cyclicality</span>
+                <span className="breakdown-value">
+                  {peCase.cyclicality_label ?? "N/A"}
+                  {peCase.cyclicality_score != null ? ` (${pct(peCase.cyclicality_score)})` : ""}
+                </span>
+              </div>
+              <div className="breakdown-row">
+                <span className="breakdown-label">Peak earnings risk</span>
+                <span className="breakdown-value">
+                  {peCase.peak_earnings_risk != null ? pct(peCase.peak_earnings_risk) : "N/A"}
+                </span>
+              </div>
+              <div className="breakdown-row">
+                <span className="breakdown-label">Structural re-rating</span>
+                <span className="breakdown-value">
+                  {peCase.structural_re_rating_score != null ? pct(peCase.structural_re_rating_score) : "N/A"}
+                </span>
+              </div>
               {peCase.uncertainty_reasons.length > 0 && (
                 <div className="breakdown-row breakdown-row-stack">
                   <span className="breakdown-label">Uncertainty triggers</span>

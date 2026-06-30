@@ -9,7 +9,6 @@ interface ForwardTrendProps {
 export function ForwardTrend({ trend, currentPrice, peMultiple }: ForwardTrendProps) {
   if (trend.length === 0) return null;
 
-  // Find max implied price for bar chart scaling
   const maxPrice = Math.max(...trend.map((t) => t.implied_price), currentPrice);
 
   return (
@@ -20,8 +19,10 @@ export function ForwardTrend({ trend, currentPrice, peMultiple }: ForwardTrendPr
           Based on {peMultiple.toFixed(1)}x base P/E applied to analyst EPS estimates
         </p>
       )}
+      <p className="trend-subtitle trend-validation-note">
+        EPS years without a second matching source are still shown, but marked as potentially unreliable.
+      </p>
       <div className="trend-chart">
-        {/* Current price reference bar */}
         <div className="trend-row">
           <span className="trend-year">Now</span>
           <div className="trend-bar-wrapper">
@@ -31,10 +32,13 @@ export function ForwardTrend({ trend, currentPrice, peMultiple }: ForwardTrendPr
             />
           </div>
           <span className="trend-price">${currentPrice.toFixed(0)}</span>
-          <span className="trend-eps">—</span>
+          <span className="trend-eps">-</span>
         </div>
         {trend.map((t) => {
           const upside = ((t.implied_price - currentPrice) / currentPrice) * 100;
+          const isCrossChecked = t.eps_validation_status === "cross_checked";
+          const sourceLabel = t.source ? t.source.replace(/_/g, " ") : "unknown";
+
           return (
             <div key={t.year} className="trend-row">
               <span className="trend-year">{t.year}</span>
@@ -47,6 +51,13 @@ export function ForwardTrend({ trend, currentPrice, peMultiple }: ForwardTrendPr
               <span className="trend-price">${t.implied_price.toFixed(0)}</span>
               <span className="trend-eps">
                 EPS ${t.eps.toFixed(2)}
+                <span
+                  className={`eps-validation-badge ${isCrossChecked ? "eps-validation-ok" : "eps-validation-warning"}`}
+                  title={t.eps_validation_note ?? undefined}
+                >
+                  {isCrossChecked ? "cross-checked" : "unverified"}
+                </span>
+                <span className="eps-source-label">{sourceLabel}</span>
                 <span className={upside >= 0 ? "upside" : "downside"}>
                   {" "}{upside >= 0 ? "+" : ""}{upside.toFixed(0)}%
                 </span>

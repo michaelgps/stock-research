@@ -44,13 +44,20 @@ async def get_annual_eps_estimates(ticker: str, limit: int = 3) -> list[dict]:
             return []
         payload = resp.json()
 
-    rows = payload.get("annualEarningsEstimates") or payload.get("annualReports") or []
+    rows = payload.get("annualEarningsEstimates") or payload.get("annualReports") or payload.get("estimates") or []
     estimates = []
     for row in rows:
+        horizon = str(row.get("horizon") or "").lower()
+        if horizon and horizon != "fiscal year":
+            continue
         fiscal_year = _extract_fiscal_year(row)
         eps = _safe_float(
             row.get("consensusEPSForecast")
+            or row.get("eps_estimate")
+            or row.get("eps_estimate_average")
+            or row.get("estimatedEPS")
             or row.get("estimatedEPSAvg")
+            or row.get("estimatedEPSAverage")
             or row.get("epsEstimateAverage")
             or row.get("epsAvg")
         )

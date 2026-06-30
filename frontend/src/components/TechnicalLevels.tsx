@@ -301,7 +301,29 @@ function ReferenceLevels({ references }: { references: TechnicalReferenceLevel[]
           ))}
         </div>
       ) : (
-        <div className="technical-empty">No nearby moving average, gap, or prior high/low references.</div>
+        <div className="technical-empty">No nearby moving average, gap, Fibonacci, or prior high/low references.</div>
+      )}
+    </section>
+  );
+}
+
+function LongTermZones({ zones }: { zones: TechnicalZone[] }) {
+  return (
+    <section className="technical-zone-group technical-long-term-group">
+      <div className="technical-section-heading">
+        <div>
+          <h4>Longer-Term Volume References</h4>
+          <p>Up to 3Y daily OHLCV. These are context references, not the primary 1Y support/resistance map.</p>
+        </div>
+      </div>
+      {zones.length ? (
+        <div className="technical-zone-grid">
+          {zones.map((zone) => (
+            <ZoneCard key={`long-term-${zone.level_type}-${zone.price_low}-${zone.price_high}`} zone={zone} />
+          ))}
+        </div>
+      ) : (
+        <div className="technical-empty">No qualified longer-term volume reference within the nearby price window.</div>
       )}
     </section>
   );
@@ -316,7 +338,7 @@ export function TechnicalLevels({ levels }: TechnicalLevelsProps) {
           <h3>Technical Levels</h3>
           <p>
             Volume-confirmed zones use 1Y daily OHLCV. Moving averages, gaps,
-            and prior highs/lows are shown separately as references.
+            Fibonacci retracements, and prior highs/lows are shown separately as references.
           </p>
         </div>
         <div className="technical-current-price">
@@ -348,6 +370,7 @@ export function TechnicalLevels({ levels }: TechnicalLevelsProps) {
         zones={levels.resistance_zones}
         emptyText="No qualified resistance zone above current price."
       />
+      <LongTermZones zones={levels.long_term_zones ?? []} />
       <ReferenceLevels references={levels.reference_levels ?? []} />
 
       {levels.notes.length > 0 && (
