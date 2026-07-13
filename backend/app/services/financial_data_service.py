@@ -36,7 +36,7 @@ def _merge_company(base: CompanyInfo | None, incoming: CompanyInfo | None) -> Co
         return base
     if base is None:
         return incoming
-    for field in ("name", "sector", "industry", "market_cap", "current_price", "shares_outstanding"):
+    for field in ("name", "sector", "industry", "market_cap", "current_price", "shares_outstanding", "currency"):
         value = getattr(incoming, field)
         if value is not None:
             setattr(base, field, value)
@@ -204,6 +204,7 @@ def _row_to_company(db: Session, ticker: str) -> CompanyInfo:
         market_cap=profile.market_cap if profile else None,
         current_price=profile.current_price if profile else None,
         shares_outstanding=profile.shares_outstanding if profile else None,
+        currency=company.currency if company else None,
     )
 
 
@@ -227,6 +228,7 @@ def _row_to_statement(row) -> FinancialStatementData:
         total_assets=row.total_assets,
         total_equity=row.total_equity,
         diluted_shares=row.diluted_shares,
+        currency=(row.raw_data_json or {}).get("currency"),
         source=row.source,
     )
 

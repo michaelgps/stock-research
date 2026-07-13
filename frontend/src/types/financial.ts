@@ -6,6 +6,7 @@ export interface CompanyInfo {
   market_cap: number | null;
   current_price: number | null;
   shares_outstanding: number | null;
+  currency: string | null;
 }
 
 export interface FinancialStatement {
@@ -27,6 +28,7 @@ export interface FinancialStatement {
   total_assets: number | null;
   total_equity: number | null;
   diluted_shares: number | null;
+  currency: string | null;
   source: string | null;
 }
 
@@ -97,7 +99,7 @@ export interface PeerComparison {
 
 export interface ScenarioResult {
   label: string;
-  dcf: DCFResult;
+  dcf: DCFResult | null;
   multiples: MultiplesResult;
   blended_per_share: number | null;
 }

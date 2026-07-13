@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 # Upside band (±) around current price within which a verdict is "fairly_valued".
 _VERDICT_BAND = 0.15
 _MAX_FORWARD_VALUATION_YEARS = 3
+_EPS_CURRENCY_MISMATCH_THRESHOLD = 0.25
 
 
 async def run_valuation(
@@ -184,6 +185,35 @@ async def run_valuation(
                 "FMP annual analyst EPS is unavailable for this ticker under the current data plan; "
                 "Yahoo Finance current-FY consensus EPS is used as a fallback."
             )
+        elif _requires_yfinance_currency_fallback(forward_eps_estimate, yf_validation):
+            if fallback_estimates:
+                valuation_analyst_estimates = _replace_fmp_eps_with_yfinance(
+                    valuation_analyst_estimates,
+                    fallback_estimates,
+                )
+                forward_eps_estimate = fallback_estimates[0]
+                forward_eps = forward_eps_estimate.eps_estimate
+                actual_eps = None
+                yearly_pe_ranges = []
+                divergence = yf_validation.get("divergence")
+                data_quality["forward_eps_currency_mismatch"] = {
+                    "fmp_eps": yf_validation.get("fmp_eps"),
+                    "yfinance_eps": yf_validation.get("yf_current_fy_eps"),
+                    "divergence": divergence,
+                    "threshold": _EPS_CURRENCY_MISMATCH_THRESHOLD,
+                    "action": "FMP EPS and historical P/E inputs excluded; Yahoo ADR EPS used.",
+                }
+                data_quality["forward_eps_fallback_warning"] = (
+                    "FMP EPS materially conflicts with Yahoo Finance ADR EPS and may use a different "
+                    "currency or share basis; Yahoo Finance consensus EPS is used instead."
+                )
+                data_quality["historical_pe_eps_basis"] = "unavailable_currency_or_share_basis_mismatch"
+                data_quality["pe_range_years"] = "unavailable_currency_or_share_basis_mismatch"
+            else:
+                data_quality["forward_eps_unavailable_reason"] = (
+                    "FMP EPS conflicts with Yahoo Finance ADR EPS, but Yahoo did not provide a usable "
+                    "replacement estimate."
+                )
         elif forward_eps is None:
             unavailable_reason = _forward_eps_unavailable_reason(db, data.company.ticker)
             if unavailable_reason:
@@ -193,7 +223,7 @@ async def run_valuation(
             logger.warning(
                 "%s EPS divergence: FMP=%.2f vs YF=%.2f (%.1f%%)",
                 data.company.ticker,
-                forward_eps or 0,
+                yf_validation.get("fmp_eps") or 0,
                 yf_validation.get("yf_current_fy_eps") or 0,
                 (yf_validation.get("divergence") or 0) * 100,
             )
@@ -204,7 +234,8 @@ async def run_valuation(
     data_quality["forward_eps_validation_policy"] = (
         "Primary valuation uses only the first 3 forward fiscal-year EPS estimates. "
         "FMP is preferred; Alpha Vantage is the first fallback when configured; "
-        "Yahoo Finance is the final near-term fallback when FMP/Alpha forward EPS is unavailable."
+        "Yahoo Finance is the final near-term fallback when FMP/Alpha forward EPS is unavailable or "
+        "materially conflicts with the ADR share/currency basis."
     )
 
     valuation_data = _with_analyst_estimates(data, valuation_analyst_estimates)
@@ -263,9 +294,21 @@ async def run_valuation(
         else:
             data_quality["peer_comparison"] = "not_available"
 
+    dcf_available, dcf_unavailable_reason = _is_dcf_currency_compatible(
+        data,
+        has_eps_currency_mismatch="forward_eps_currency_mismatch" in data_quality,
+    )
+    if not dcf_available:
+        data_quality["dcf_unavailable_reason"] = dcf_unavailable_reason
+        data_quality["reverse_dcf_unavailable_reason"] = dcf_unavailable_reason
+
     # --- Run base DCF first to compute the DCF-implied P/E cross-check ---
-    base_dcf = run_dcf(base_a, latest_revenue, net_debt, shares, analyst_revenues=analyst_revenues or None)
-    justified_pe = compute_justified_pe(base_dcf.per_share_value, forward_eps)
+    base_dcf = (
+        run_dcf(base_a, latest_revenue, net_debt, shares, analyst_revenues=analyst_revenues or None)
+        if dcf_available
+        else None
+    )
+    justified_pe = compute_justified_pe(base_dcf.per_share_value, forward_eps) if base_dcf else None
     if justified_pe is not None:
         data_quality["dcf_implied_pe_cross_check"] = round(justified_pe, 1)
 
@@ -273,9 +316,11 @@ async def run_valuation(
     scenarios = {}
     base_pe_mult = None
     for label, assumptions in [("bear", bear_a), ("base", base_a), ("bull", bull_a)]:
-        dcf_result = base_dcf if label == "base" else run_dcf(
-            assumptions, latest_revenue, net_debt, shares, analyst_revenues=analyst_revenues or None
-        )
+        dcf_result = None
+        if dcf_available:
+            dcf_result = base_dcf if label == "base" else run_dcf(
+                assumptions, latest_revenue, net_debt, shares, analyst_revenues=analyst_revenues or None
+            )
         mult_result = run_multiples(
             valuation_data, label, forward_eps,
             yearly_pe_ranges=yearly_pe_ranges,
@@ -332,7 +377,7 @@ async def run_valuation(
     # --- Terminal Value Warning ---
     tv_warning = None
     base_dcf_result = scenarios["base"].dcf
-    if base_dcf_result.enterprise_value > 0:
+    if base_dcf_result and base_dcf_result.enterprise_value > 0:
         tv_pct = base_dcf_result.present_value_terminal / base_dcf_result.enterprise_value
         data_quality["terminal_value_pct_of_ev"] = round(tv_pct * 100, 1)
         if tv_pct > 0.75:
@@ -348,12 +393,13 @@ async def run_valuation(
         label="DCF Intrinsic Value",
         methodology="discounted_cash_flow",
         current_price=current_price,
-        bear_value=scenarios["bear"].dcf.per_share_value,
-        base_value=scenarios["base"].dcf.per_share_value,
-        bull_value=scenarios["bull"].dcf.per_share_value,
+        bear_value=scenarios["bear"].dcf.per_share_value if scenarios["bear"].dcf else None,
+        base_value=scenarios["base"].dcf.per_share_value if scenarios["base"].dcf else None,
+        bull_value=scenarios["bull"].dcf.per_share_value if scenarios["bull"].dcf else None,
         notes=[
             "Standalone intrinsic value view based on projected free cash flow and WACC.",
             "Not averaged with market multiple valuation.",
+            *([f"Unavailable: {dcf_unavailable_reason}"] if not dcf_available else []),
         ],
     )
     pe_view = _build_view(
@@ -382,15 +428,19 @@ async def run_valuation(
         )
 
     # --- Reverse DCF ---
-    reverse_dcf = _compute_reverse_dcf(
-        current_price=current_price,
-        latest_revenue=latest_revenue,
-        net_debt=net_debt,
-        shares=shares,
-        fcf_margin=base_a.fcf_margin,
-        wacc=base_a.discount_rate,
-        terminal_growth=base_a.terminal_growth_rate,
-        projection_years=base_a.projection_years,
+    reverse_dcf = (
+        _compute_reverse_dcf(
+            current_price=current_price,
+            latest_revenue=latest_revenue,
+            net_debt=net_debt,
+            shares=shares,
+            fcf_margin=base_a.fcf_margin,
+            wacc=base_a.discount_rate,
+            terminal_growth=base_a.terminal_growth_rate,
+            projection_years=base_a.projection_years,
+        )
+        if dcf_available
+        else None
     )
 
     forward_eps_metadata = _build_forward_eps_metadata(
@@ -401,7 +451,7 @@ async def run_valuation(
         forward_trend=forward_trend,
         latest_fiscal_year_end=fy_end_date,
         dcf_present_value=dcf_view.base_value,
-        discount_rate=base_a.discount_rate,
+        discount_rate=base_a.discount_rate if dcf_available else None,
         pe_multiple=base_pe_mult,
         current_price=current_price,
         scenario_results=scenarios,
@@ -439,7 +489,13 @@ def _get_forward_eps_estimate(data: FinancialDataResponse) -> AnalystEstimateDat
         e for e in data.analyst_estimates
         if e.eps_estimate is not None and e.source == "fmp" and e.period and e.period.isdigit()
     ]
-    estimates.sort(key=lambda e: e.period)
+    estimates.sort(key=lambda e: int(e.period))
+    current_forward_fy = _infer_current_forward_fiscal_year(data)
+    if current_forward_fy is not None:
+        return next(
+            (estimate for estimate in estimates if int(estimate.period) >= current_forward_fy),
+            None,
+        )
     return estimates[0] if estimates else None
 
 
@@ -482,6 +538,60 @@ def _build_yfinance_forward_eps_estimates(
             source="yfinance",
         ))
     return estimates
+
+
+def _requires_yfinance_currency_fallback(
+    forward_eps_estimate: AnalystEstimateData | None,
+    yf_validation: dict | None,
+) -> bool:
+    """Reject FMP EPS when the same ADR fiscal year materially disagrees with Yahoo."""
+    if not forward_eps_estimate or forward_eps_estimate.source != "fmp":
+        return False
+    if not isinstance(yf_validation, dict) or not yf_validation.get("warning"):
+        return False
+    divergence = _positive_number(yf_validation.get("divergence"))
+    return divergence is not None and divergence > _EPS_CURRENCY_MISMATCH_THRESHOLD
+
+
+def _replace_fmp_eps_with_yfinance(
+    estimates: list[AnalystEstimateData],
+    yfinance_estimates: list[AnalystEstimateData],
+) -> list[AnalystEstimateData]:
+    """Keep non-FMP estimates and replace an incompatible FMP EPS basis with Yahoo ADR EPS."""
+    filtered = [estimate for estimate in estimates if estimate.source != "fmp"]
+    filtered.extend(yfinance_estimates)
+    filtered.sort(key=lambda estimate: (
+        int(estimate.period) if estimate.period and str(estimate.period).isdigit() else 9999,
+        estimate.source or "",
+    ))
+    return filtered
+
+
+def _is_dcf_currency_compatible(
+    data: FinancialDataResponse,
+    has_eps_currency_mismatch: bool,
+) -> tuple[bool, str | None]:
+    """Prevent DCF when financial statement currency cannot be matched to the traded share basis."""
+    statement_currencies = {
+        statement.currency.upper()
+        for statement in data.annual_statements
+        if statement.currency
+    }
+    quote_currency = (data.company.currency or "").upper()
+
+    if statement_currencies and quote_currency and statement_currencies != {quote_currency}:
+        return (
+            False,
+            f"Financial statements are reported in {', '.join(sorted(statement_currencies))}, "
+            f"while the traded quote is {quote_currency}. FX and ADR-share conversion are not configured.",
+        )
+    if has_eps_currency_mismatch:
+        return (
+            False,
+            "Forward EPS sources indicate an incompatible currency or ADR share basis; "
+            "DCF is withheld until the financial statements can be converted consistently.",
+        )
+    return True, None
 
 
 def _build_alpha_vantage_forward_eps_estimates(

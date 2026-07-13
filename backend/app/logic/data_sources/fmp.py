@@ -61,6 +61,7 @@ async def get_company_info(ticker: str) -> CompanyInfo | None:
         industry=profile.get("industry"),
         market_cap=profile.get("marketCap"),
         current_price=profile.get("price"),
+        currency=profile.get("currency"),
     )
 
 
@@ -105,6 +106,7 @@ async def get_financial_statements(ticker: str) -> list[FinancialStatementData]:
                 total_assets=bal.get("totalAssets"),
                 total_equity=bal.get("totalStockholdersEquity"),
                 diluted_shares=inc.get("weightedAverageShsOutDil"),
+                currency=inc.get("reportedCurrency"),
                 source="fmp",
             )
         )

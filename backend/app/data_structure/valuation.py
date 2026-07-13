@@ -40,7 +40,7 @@ class MultiplesResult(BaseModel):
 class ScenarioResult(BaseModel):
     """Combined result for a single scenario (bear, base, or bull)."""
     label: str  # "bear", "base", "bull"
-    dcf: DCFResult
+    dcf: DCFResult | None = None
     multiples: MultiplesResult
     blended_per_share: float | None = None  # deprecated: DCF and P/E are no longer blended
 

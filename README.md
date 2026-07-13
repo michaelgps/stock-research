@@ -296,6 +296,14 @@ DCF Rolled-Forward Value = DCF Present Value Today * (1 + WACC) ^ years_to_fisca
 
 The rolled-forward DCF value is shown as a reference note for the same fiscal year end. It is not blended with P/E and does not drive the forward P/E case cards.
 
+#### Currency and ADR Safety Guardrail
+
+DCF requires financial statements, net debt, diluted shares, and the traded quote to be on a consistent currency and share basis. This matters for foreign companies listed in the US as ADRs: a provider can return local-currency financial statements while the quoted ADR trades in USD.
+
+The model stores reported financial-statement currency when the provider supplies it. If the financial-statement currency differs from the traded quote currency, or forward EPS sources indicate a material ADR/currency-basis mismatch, the model does not produce DCF or reverse-DCF values. It returns a `dcf_unavailable_reason` in `data_quality` instead.
+
+This is intentionally conservative. Automatic FX and ADR-ratio conversion is not active yet, so withholding a DCF is safer than showing a numerically precise but invalid value.
+
 ### Forward P/E Model
 
 The P/E model uses the ticker's own last ~5 fiscal years of daily trailing P/E observations, but it no longer applies historical P/E percentiles directly to forward EPS.
@@ -347,6 +355,8 @@ Forward EPS is cross-checked against other sources when available:
 | Yahoo Finance | Current FY and next FY EPS | Final free near-term fallback if FMP and Alpha Vantage are unavailable |
 
 If FMP returns an entitlement error such as `402 Payment Required` for analyst estimates, the model does not treat this as a rate-limit event. It records the provider-access issue in `data_quality`. When Alpha Vantage is configured and has usable annual EPS estimates, the backend marks `forward_eps_source` as `alpha_vantage_annual_eps_estimates_fallback` and still produces fiscal-year P/E valuation windows. If Alpha Vantage is unavailable but Yahoo Finance has usable current-FY consensus EPS, the backend marks `forward_eps_source` as `yfinance_fallback_current_fy_consensus`. If none of these sources provides usable forward EPS, the UI shows a clear "Forward P/E valuation unavailable" message instead of rendering empty valuation cards.
+
+If FMP EPS and Yahoo Finance's same-ADR current-fiscal-year EPS differ by more than `25%`, the model treats the FMP EPS as potentially using another currency or share basis. It removes FMP EPS from the valuation sequence, uses Yahoo ADR EPS when available, and disables historical P/E ranges derived from the incompatible annual EPS. The response records this under `forward_eps_currency_mismatch`.
 
 Fallback order is intentionally one-way:
 
@@ -874,6 +884,7 @@ npm run lint
 
 - The project currently uses SQLAlchemy `create_all`; production migrations should be added with Alembic before schema changes are shared broadly.
 - FMP and Finnhub may return empty data or provider-specific errors depending on the subscription tier.
+- Automatic FX and ADR-ratio conversion is not implemented. When financial-statement and quote currencies cannot be reconciled safely, DCF and reverse DCF are intentionally unavailable.
 - Peer data is reference-only. The current P/E range is based on forward EPS growth, company quality, deceleration, uncertainty, and historical P/E guardrails, not peers.
 - The automatic P/E policy is deterministic and rule-based; it should be reviewed against expert judgment before being used for high-conviction decisions.
 - FRED is optional. If unavailable, the model uses the default risk-free rate.

@@ -83,11 +83,17 @@ function ValuationWindow({ title, fyWindow, badgeClass, currentPrice }: Valuatio
         </div>
       )}
 
-      <p className="dcf-reference-note">
-        DCF reference only: rolled-forward value {money(fyWindow?.dcf_rolled_forward_value)}
-        {" "}from present DCF {money(fyWindow?.dcf_present_value)}
-        {" "}compounded at {fyWindow?.discount_rate_used != null ? pct(fyWindow.discount_rate_used) : "N/A"}.
-      </p>
+      {fyWindow?.dcf_present_value != null ? (
+        <p className="dcf-reference-note">
+          DCF reference only: rolled-forward value {money(fyWindow.dcf_rolled_forward_value)}
+          {" "}from present DCF {money(fyWindow.dcf_present_value)}
+          {" "}compounded at {fyWindow.discount_rate_used != null ? pct(fyWindow.discount_rate_used) : "N/A"}.
+        </p>
+      ) : (
+        <p className="dcf-reference-note">
+          DCF unavailable because the reported financial-statement currency or ADR share basis cannot be matched safely.
+        </p>
+      )}
 
       <div className="scenario-cards scenario-cards-inline">
         {peCases.map((peCase) => (

@@ -9,6 +9,7 @@ class CompanyInfo(BaseModel):
     market_cap: float | None = None
     current_price: float | None = None
     shares_outstanding: float | None = None
+    currency: str | None = None
 
 
 class FinancialStatementData(BaseModel):
@@ -34,6 +35,7 @@ class FinancialStatementData(BaseModel):
     total_equity: float | None = None
 
     diluted_shares: float | None = None
+    currency: str | None = None
     source: str | None = None
 
 

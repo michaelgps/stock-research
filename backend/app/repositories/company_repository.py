@@ -10,6 +10,7 @@ def upsert(db: Session, info: CompanyInfo, cik: str | None = None) -> tuple[int,
     values = {
         "company_name": info.name,
         "cik": cik,
+        "currency": info.currency,
     }
     if row:
         for key, value in values.items():
