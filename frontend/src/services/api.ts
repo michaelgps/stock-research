@@ -4,9 +4,12 @@ import type {
   ValuationResponse,
 } from "../types/financial";
 
+const DEFAULT_API_BASE = import.meta.env.DEV
+  ? `${window.location.protocol}//${window.location.hostname}:8000`
+  : window.location.origin;
+
 const API_BASE = (
-  import.meta.env.VITE_API_BASE_URL ||
-  `${window.location.protocol}//${window.location.hostname}:8000`
+  import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE
 ).replace(/\/$/, "");
 
 async function apiGet<T>(path: string): Promise<T> {
